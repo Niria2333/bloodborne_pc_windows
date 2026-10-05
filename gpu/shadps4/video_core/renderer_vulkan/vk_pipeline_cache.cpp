@@ -1,3 +1,4 @@
+// Windows port modifications by yaonikaixin999999, 2026-10-05.
 // SPDX-FileCopyrightText: Copyright 2024-2026 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
@@ -847,8 +848,14 @@ PipelineCache::Result PipelineCache::GetProgram(PipelineSelection& sel, HwStage 
         // pointers in the registers; ahead of the GPU thread that memory may already be
         // reused. A fault returns here (runtime_fault_recover) and the draw is left to the GPU
         // thread. A jump out of the specialization leaks its partial allocations (rare).
+#ifdef _WIN32
+        jmp_buf recover;
+        // Recovery resumes a speculative read directly; do not unwind SEH frames.
+        if (_setjmp(recover, nullptr)) {
+#else
         sigjmp_buf recover;
         if (sigsetjmp(recover, 0)) {
+#endif
             worker.failed = true;
             return {};
         }

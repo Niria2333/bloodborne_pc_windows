@@ -1,3 +1,4 @@
+// Windows port modifications by yaonikaixin999999, 2026-10-05.
 // SPDX-FileCopyrightText: Copyright 2024 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
@@ -169,6 +170,7 @@ public:
 
 private:
     u64 DurationMillis() const;
+    u64 CurrentTimeLocked();
     AvPlayerStreamInfo CreateStreamInfo(u32 stream_index);
 
     static void ReleaseAVPacket(AVPacket* packet);
@@ -213,6 +215,8 @@ private:
     std::atomic_bool m_is_looping = false;
     std::atomic_bool m_is_paused = false;
     std::atomic_bool m_is_eof = false;
+    std::atomic_uint m_decoders_running = 0;
+    EventCV m_decoders_done_cv{};
 
     std::unique_ptr<IDataStreamer> m_up_data_streamer;
 

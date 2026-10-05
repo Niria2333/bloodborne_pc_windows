@@ -1,3 +1,4 @@
+// Windows port modifications by yaonikaixin999999, 2026-10-05.
 // SPDX-FileCopyrightText: Copyright 2024 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
@@ -35,11 +36,13 @@ int PS4_SYSV_ABI sceAvPlayerChangeStream() {
 }
 
 s32 PS4_SYSV_ABI sceAvPlayerClose(AvPlayerHandle handle) {
+    AvPlayerTrace(handle, "api close enter");
     LOG_TRACE(Lib_AvPlayer, "called");
     if (handle == nullptr) {
         return ORBIS_AVPLAYER_ERROR_INVALID_PARAMS;
     }
     delete handle;
+    AvPlayerTrace(handle, "api close done");
     return ORBIS_OK;
 }
 

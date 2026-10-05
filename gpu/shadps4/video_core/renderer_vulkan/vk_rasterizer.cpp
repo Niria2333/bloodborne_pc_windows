@@ -1,3 +1,4 @@
+// Windows port modifications by yaonikaixin999999, 2026-10-05.
 // SPDX-FileCopyrightText: Copyright 2024-2026 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
@@ -740,8 +741,14 @@ void Rasterizer::RunDrawPacket(void* context, const u8* data, u32 size) {
             std::memcpy(flat.data(), snapshot.user_data,
                         std::min(snapshot.user_data_size, snapshot.flat_size) * sizeof(u32));
             // Pointers in the tables may be stale by now: a fault only skips the check.
+#ifdef _WIN32
+            jmp_buf recover;
+            // Recovery resumes a speculative read directly; do not unwind SEH frames.
+            if (_setjmp(recover, nullptr)) {
+#else
             sigjmp_buf recover;
             if (sigsetjmp(recover, 0)) {
+#endif
                 runtime_fault_recover = nullptr;
                 continue;
             }

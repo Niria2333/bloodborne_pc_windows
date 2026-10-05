@@ -1,3 +1,51 @@
+# 血源 bbport Windows 原生移植 / Bloodborne native Windows port
+
+这是发布在 [yaonikaixin999999](https://github.com/yaonikaixin999999/bloodborne_pc_windows) 账号下的独立开源项目，基于 [deadinside28/bloodborne_pc](https://github.com/deadinside28/bloodborne_pc) 开展 Windows x64 适配。**保留原作者版权、完整上游历史、GPL-2.0-or-later 许可证与第三方署名**。Windows 新增工作不代表整个项目从零原创。
+
+目前已实现原生 Windows 运行库、Vulkan 渲染器、中文启动器、开场黑屏与音频等待修复，以及全屏、可选 Xbox 按键映射和角色命名键盘。CUSA03023 1.09 已进入实际关卡，用户确认可正常命名并进入游戏；1080p 着色器预热后观察到 60 FPS，首次着色器编译时仍有短暂掉帧。
+
+**本项目仍为实验版本。** 4K 为可选输出设置，持续 4K/60 FPS、完整通关和长期稳定性尚未验证。FSR 4 v07 INT8 的资源校验与独立 1080p 基准已通过；游戏内 FSR 4 和 FSR 4.1.1 Windows 适配仍需完成验证或实现。
+
+**本次发布仅含源码，不含游戏本体、Sony 模块、存档或预编译安装包。** 需要自行准备已解密的 CUSA03173 或 CUSA03023、1.09 版游戏目录。自动测试通过 16/16 CTest 和 74/74 Python 测试。
+
+阅读 [完整中文 README](README.zh-CN.md)、[Windows 构建与运行说明](docs/WINDOWS.md)、[移植总结](docs/WINDOWS_PORT_SUMMARY.md) 和 [验证记录](docs/WINDOWS_VALIDATION.md)。原始 Linux 文档保留在本页下方，其性能数字和 FSR 4.1.1 结果属于上游 Linux 环境。
+
+## English overview
+
+[简体中文](README.zh-CN.md) · [Windows build and run guide](docs/WINDOWS.md) · [Validation](docs/WINDOWS_VALIDATION.md) · [Port summary](docs/WINDOWS_PORT_SUMMARY.md)
+
+Windows source: [yaonikaixin999999/bloodborne_pc_windows](https://github.com/yaonikaixin999999/bloodborne_pc_windows), branch `codex/windows-port`.
+
+This independent repository adds a native Windows x64 runtime, Vulkan renderer build, and Chinese launcher to [deadinside28/bloodborne_pc](https://github.com/deadinside28/bloodborne_pc). The original project's history, copyright notices and Linux documentation are retained below. Bloodborne's original x86-64 game code runs through a runtime written for this game; this is not a general PS4 emulator.
+
+**Status: experimental, early gameplay verified on one Windows 11 PC.** A CUSA03023 v1.09 dump reached the first playable area after character naming and Chinese menus. Warm-shader 1080p gameplay was observed at 60 FPS, with temporary drops during shader compilation. A full play-through and sustained 4K/60 FPS gameplay have not been verified.
+
+The Windows additions include:
+
+- A MinGW UCRT64 build, Windows guest threads/TLS, shared memory mapping, exception handling, files and saves, and a native SDL3/Vulkan presenter.
+- Fixes for the opening-video stop/EOF lifecycle and Windows audio-buffer timing.
+- A Chinese launcher with automatic/Chinese/English game language, fullscreen/windowed modes, optional Xbox button mapping, and a controller-operated character-name keyboard.
+- Independent output resolution and graphics quality, FSR 3.1, optional FSR 4 v07 INT8, TAA, effects, and 30/60/90/display-paced frame-rate choices. 90 FPS and display-paced modes are experimental. **FSR 4.1.1 Windows adaptation is pending and cannot be selected in this launcher.**
+
+**This publication contains source code, not a prebuilt Windows release or game data.** Bring your own decrypted CUSA03173 or CUSA03023 v1.09 game directory. FSR 4 model/shader assets are downloaded separately by the included Windows tool; FSR 3.1 needs no model download.
+
+```powershell
+git clone --branch codex/windows-port --recurse-submodules https://github.com/yaonikaixin999999/bloodborne_pc_windows.git
+cd bloodborne_pc_windows
+powershell -NoProfile -ExecutionPolicy Bypass -File .\build_windows.ps1 -MsysRoot "C:\msys64" -Test
+python .\run_windows.py --gui
+```
+
+Install the prerequisites in the [Windows guide](docs/WINDOWS.md) first; it lists the MSYS2 dependencies, game-directory layout, and settings. Latest automated validation: **16/16 CTest and 74/74 Python tests passed**.
+
+This derivative retains the upstream **GPL-2.0-or-later** license ([LICENSE](LICENSE)). The renderer derives from shadPS4; FSR-Vulkan, AMD FidelityFX, Dear ImGui, LibAtrac9, and other dependencies retain their own notices. Credits below apply to this Windows project too. The project is not affiliated with Sony Interactive Entertainment, FromSoftware, or AMD.
+
+---
+
+## Original upstream Linux documentation
+
+The following documentation is preserved from the upstream project. Its Linux instructions, RX 7800 XT performance numbers, and FSR 4.1.1 claims describe that upstream environment, not validation of the Windows port. Use the Windows links above for Windows support and limitations.
+
 THIS PROJECT IS NOT RELATED TO SHADPS4. ALL QUESTIONS RELATED TO THIS PROJECT SHOULD BE SENT TO THE DISCORD SERVER https://discord.gg/KYZRKk9CB, NOT TO THE SHADPS4 SERVER.
 
 

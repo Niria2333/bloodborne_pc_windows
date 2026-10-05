@@ -1,12 +1,14 @@
+# Windows port modifications by yaonikaixin999999, 2026-10-05.
 """Boundary tests for the native loader; uses tiny synthetic x86-64 images."""
 from paths import ROOT
 from pathlib import Path
+import os
 import struct
 import subprocess
 import tempfile
 import unittest
 
-EXE = ROOT / 'out/bb-probe'
+EXE = Path(os.environ.get('BB_TEST_PROBE', str(ROOT / ('out/windows/bb-probe.exe' if os.name=='nt' else 'out/bb-probe'))))
 
 
 def package(code, relocs=(), names=(), capabilities=None):
@@ -63,6 +65,14 @@ class LoaderTests(unittest.TestCase):
         r=self.run_image(native_package())
         self.assertEqual(r.returncode,20,r.stdout+r.stderr)
         self.assertIn('Module 0 initializer returned 0',r.stdout)
+        self.assertIn('first unsupported PS4 import: after-native',r.stdout)
+
+    @unittest.skipUnless(os.name=='nt', 'Windows TEB guest TLS bridge')
+    def test_windows_native_export_reads_guest_tcb_from_teb(self):
+        # Read GS:[0x28], check TCB.self, then return; UD2 catches a bad bridge.
+        native=bytes.fromhex('65488b042528000000483b0074020f0bc3')
+        r=self.run_image(native_package(native=native))
+        self.assertEqual(r.returncode,20,r.stdout+r.stderr)
         self.assertIn('first unsupported PS4 import: after-native',r.stdout)
 
     def test_host_contract_takes_priority_over_native_export(self):

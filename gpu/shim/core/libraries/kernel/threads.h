@@ -1,3 +1,4 @@
+// Windows port modifications by yaonikaixin999999, 2026-10-05.
 // bbport: host threads that may call guest code (AvPlayer allocator callbacks).
 // Each thread gets a guest TCB (GS base, TLS) from the C runtime before running.
 #pragma once
@@ -19,16 +20,19 @@ public:
             func(stop);
         });
     }
-    // A thread may stop its own Thread object (AvPlayer does); it detaches instead of joining.
+    // A callback may stop its own Thread object; it detaches instead of joining.
     void Join() {
         if (!thread.joinable()) return;
         if (thread.get_id() == std::this_thread::get_id()) thread.detach();
         else thread.join();
     }
     bool Joinable() const { return thread.joinable(); }
+    void RequestStop() {
+        if (thread.joinable()) thread.request_stop();
+    }
     void Stop() {
         if (thread.joinable()) {
-            thread.request_stop();
+            RequestStop();
             Join();
         }
     }

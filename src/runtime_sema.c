@@ -1,3 +1,4 @@
+// Windows port modifications by yaonikaixin999999, 2026-10-05.
 /* Kernel semaphores: 32-bit IDs, counted tokens and FIFO waiters.
  * Priority-ordered semaphores are approximated by FIFO order. */
 #define _GNU_SOURCE
@@ -5,7 +6,6 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#ifndef _WIN32
 #include <pthread.h>
 #include <errno.h>
 #include <time.h>
@@ -70,7 +70,9 @@ static int32_t wait_count(uint32_t id,int32_t need,uint32_t *timeout,int block) 
         Waiter w={.need=need};
         pthread_condattr_t attr;
         host_check(pthread_condattr_init(&attr));
+#ifndef _WIN32
         host_check(pthread_condattr_setclock(&attr,CLOCK_MONOTONIC));
+#endif
         host_check(pthread_cond_init(&w.event,&attr));
         host_check(pthread_condattr_destroy(&attr));
         Waiter **tail=&s->first;
@@ -79,6 +81,14 @@ static int32_t wait_count(uint32_t id,int32_t need,uint32_t *timeout,int block) 
         uint64_t deadline=timeout ? now_ns()+(uint64_t)*timeout*1000 : 0;
         struct timespec end={.tv_sec=(time_t)(deadline/1000000000),.tv_nsec=(long)(deadline%1000000000)};
         while (!w.done) {
+#ifdef _WIN32
+            if (timeout) {
+                uint64_t now=now_ns(),remaining=deadline>now ? deadline-now : 0;
+                struct timespec real; clock_gettime(CLOCK_REALTIME,&real);
+                uint64_t absolute=(uint64_t)real.tv_sec*1000000000+real.tv_nsec+remaining;
+                end=(struct timespec){(time_t)(absolute/1000000000),(long)(absolute%1000000000)};
+            }
+#endif
             int e=timeout ? pthread_cond_timedwait(&w.event,&lock,&end) : pthread_cond_wait(&w.event,&lock);
             if (e==ETIMEDOUT && !w.done) {
                 Waiter **p=&s->first;
@@ -176,8 +186,3 @@ void runtime_sema_report(void) {
            created,deleted,acquired,signaled,timed_out);
     pthread_mutex_unlock(&lock);
 }
-#else
-uintptr_t runtime_sema_resolve(const char *name) { (void)name; return 0; }
-void runtime_sema_report(void) { puts("Runtime: Windows semaphore backend not implemented"); }
-unsigned runtime_sema_waiters(uint32_t id) { (void)id; return 0; }
-#endif

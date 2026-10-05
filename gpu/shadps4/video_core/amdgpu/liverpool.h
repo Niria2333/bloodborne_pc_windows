@@ -1,3 +1,4 @@
+// Windows port modifications by yaonikaixin999999, 2026-10-05.
 // SPDX-FileCopyrightText: Copyright 2024 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
@@ -179,7 +180,7 @@ public:
         return gpu_id;
     }
 
-#ifdef __linux__
+#if defined(__linux__) || defined(_WIN32)
     u32 GetGpuCommandProcessorThreadId() {
         return gpu_tid;
     }
@@ -277,7 +278,7 @@ private:
     std::condition_variable_any submit_cv;
     std::queue<Common::UniqueFunction<void>> command_queue{};
     std::thread::id gpu_id;
-#ifdef __linux__
+#if defined(__linux__) || defined(_WIN32)
     u32 gpu_tid;
 #endif
     s32 curr_qid{-1};

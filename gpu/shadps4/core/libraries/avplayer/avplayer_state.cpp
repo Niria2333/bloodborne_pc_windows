@@ -1,3 +1,4 @@
+// Windows port modifications by yaonikaixin999999, 2026-10-05.
 // SPDX-FileCopyrightText: Copyright 2024 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
@@ -114,12 +115,16 @@ AvPlayerState::AvPlayerState(const AvPlayerInitData& init_data)
 }
 
 AvPlayerState::~AvPlayerState() {
+    AvPlayerTrace(this, "state close enter");
+    *m_alive = false;
+    m_controller_thread.Stop();
+    AvPlayerTrace(this, "state controller stopped");
     {
         std::unique_lock lock(m_source_mutex);
         m_up_source.reset();
     }
-    m_controller_thread.Stop();
     m_event_queue.Clear();
+    AvPlayerTrace(this, "state close done");
 }
 
 void AvPlayerState::PostInit(const AvPlayerPostInitData& post_init_data) {
@@ -175,8 +180,16 @@ bool AvPlayerState::GetStreamInfo(u32 stream_index, AvPlayerStreamInfo& info) {
 
 // Called inside GAME thread
 bool AvPlayerState::Start() {
+    AvPlayerTrace(this, "state start enter", u64(m_current_state.load()));
+    const auto alive = m_alive;
+    const auto state = m_current_state.load();
+    // Stop acquires m_source_mutex itself and emits a reentrant game callback.
+    // Perform it before taking the start lock; the callback can also close us.
+    if (state != AvState::Ready && state != AvState::Stop) {
+        if (!Stop() || !*alive) return false;
+    }
     std::unique_lock lock(m_source_mutex);
-    if (m_current_state == AvState::Ready || m_current_state == AvState::Stop || Stop()) {
+    if (m_up_source != nullptr) {
         m_eof_stop_event_sent = false;
         SetState(AvState::Starting);
         if (!m_up_source->Start()) {
@@ -185,6 +198,8 @@ bool AvPlayerState::Start() {
             return false;
         }
         SetState(AvState::Play);
+        lock.unlock();
+        AvPlayerTrace(this, "state start callback");
         OnPlaybackStateChanged(AvState::Play);
         return true;
     }
@@ -195,7 +210,7 @@ bool AvPlayerState::Start() {
 
 // Called inside GAME thread
 bool AvPlayerState::Pause() {
-    std::shared_lock lock(m_source_mutex);
+    std::unique_lock lock(m_source_mutex);
     if (m_current_state == AvState::EndOfFile) {
         return true;
     }
@@ -209,13 +224,14 @@ bool AvPlayerState::Pause() {
     if (!SetState(AvState::Pause)) {
         return false;
     }
+    lock.unlock();
     OnPlaybackStateChanged(AvState::Pause);
     return true;
 }
 
 // Called inside GAME thread
 bool AvPlayerState::Resume() {
-    std::shared_lock lock(m_source_mutex);
+    std::unique_lock lock(m_source_mutex);
     if (m_up_source == nullptr || m_current_state != AvState::Pause) {
         LOG_ERROR(Lib_AvPlayer, "Could not resume playback.");
         return false;
@@ -223,6 +239,7 @@ bool AvPlayerState::Resume() {
     m_up_source->Resume();
     const auto state = m_previous_state.load();
     SetState(state);
+    lock.unlock();
     OnPlaybackStateChanged(state);
     return true;
 }
@@ -231,16 +248,18 @@ void AvPlayerState::SetAvSyncMode(AvPlayerAvSyncMode sync_mode) {
     m_sync_mode = sync_mode;
 }
 
-void AvPlayerState::AvControllerThread(std::stop_token stop) {
+void AvPlayerState::AvControllerThread(std::stop_token stop,
+                                     std::shared_ptr<std::atomic_bool> alive) {
     using std::chrono::milliseconds;
     Common::SetCurrentThreadName("shadPS4:AvController");
 
-    while (!stop.stop_requested()) {
+    while (!stop.stop_requested() && *alive) {
         if (m_event_queue.Size() != 0) {
             ProcessEvent();
             continue;
         }
         std::this_thread::sleep_for(milliseconds(5));
+        if (stop.stop_requested() || !*alive) return;
         UpdateBufferingState();
     }
 }
@@ -265,12 +284,14 @@ void AvPlayerState::WarningEvent(s32 id) {
 
 // Called inside GAME thread
 void AvPlayerState::StartControllerThread() {
-    m_controller_thread.Run([this](std::stop_token stop) { this->AvControllerThread(stop); });
+    m_controller_thread.Run([this, alive = m_alive](std::stop_token stop) {
+        this->AvControllerThread(stop, alive);
+    });
 }
 
 // Called inside GAME thread
 bool AvPlayerState::EnableStream(u32 stream_index) {
-    std::shared_lock lock(m_source_mutex);
+    std::unique_lock lock(m_source_mutex);
     if (m_up_source == nullptr) {
         return false;
     }
@@ -279,7 +300,10 @@ bool AvPlayerState::EnableStream(u32 stream_index) {
 
 // Called inside GAME thread
 bool AvPlayerState::Stop() {
-    std::shared_lock lock(m_source_mutex);
+    AvPlayerTrace(this, "state stop enter", u64(m_current_state.load()));
+    // Exclude GetVideoData/GetAudioData while their buffers and timing are cleared.
+    std::unique_lock lock(m_source_mutex);
+    AvPlayerTrace(this, "state stop acquired");
     if (m_up_source == nullptr || m_current_state == AvState::Stop) {
         return false;
     }
@@ -290,6 +314,8 @@ bool AvPlayerState::Stop() {
         return false;
     }
     m_eof_stop_event_sent = true;
+    lock.unlock();
+    AvPlayerTrace(this, "state stop callback");
     OnPlaybackStateChanged(AvState::Stop);
     return true;
 }
@@ -353,7 +379,7 @@ void AvPlayerState::OnWarning(u32 id) {
 }
 
 AvPlayerAvSyncMode AvPlayerState::GetSyncMode() {
-    return m_sync_mode;
+    return m_sync_mode.load();
 }
 
 void AvPlayerState::OnError() {
@@ -432,7 +458,10 @@ void AvPlayerState::EmitEvent(AvPlayerEvents event_id, void* event_data) {
     const auto callback = m_init_data.event_replacement.event_callback;
     if (callback) {
         const auto ptr = m_init_data.event_replacement.object_ptr;
+        AvPlayerTrace(this, "callback enter", u64(event_id));
         callback(ptr, event_id, 0, event_data);
+        // Do not dereference this after invoking game code: it may close the player.
+        AvPlayerTrace(this, "callback returned", u64(event_id));
     }
 }
 
@@ -442,7 +471,7 @@ void AvPlayerState::ProcessEvent() {
         return;
     }
 
-    std::lock_guard guard(m_event_handler_mutex);
+    std::unique_lock guard(m_event_handler_mutex);
 
     auto event = m_event_queue.Pop();
     if (!event.has_value()) {
@@ -450,6 +479,7 @@ void AvPlayerState::ProcessEvent() {
     }
     switch (event->event) {
     case AvEventType::WarningId: {
+        guard.unlock();
         EmitEvent(AvPlayerEvents::WarningId, &event->payload.error);
         break;
     }
@@ -465,6 +495,7 @@ void AvPlayerState::ProcessEvent() {
         }
         if (found) {
             SetState(AvState::Ready);
+            guard.unlock();
             OnPlaybackStateChanged(AvState::Ready);
         } else {
             OnWarning(ORBIS_AVPLAYER_ERROR_NOT_SUPPORTED);

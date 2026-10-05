@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# Windows port modifications by yaonikaixin999999, 2026-10-05.
 """Inspect an already plaintext PS4 SELF; prepare a native entry-point probe.
 
 No decryption, patches to source files, third-party modules or Python dependencies.
@@ -237,7 +238,7 @@ def prepare(game, out):
                   bundled_modules=sorted(p.name for p in (game / 'sce_module').iterdir()),
                   resources=dict(resources), resource_bytes=total_bytes,
                   status='Prepared only; execution and Vulkan are tested separately.')
-    (out / 'analysis.json').write_text(json.dumps(report, ensure_ascii=False, indent=2) + '\n')
+    (out / 'analysis.json').write_text(json.dumps(report, ensure_ascii=False, indent=2) + '\n',encoding='utf-8')
     print(f"{report['sfo'].get('TITLE')} | entry={header[4]:#x} | image={size:,} bytes")
     print(f"{len(names)} imported symbols; {sum(counts.values()):,} relocations; {len(report['needed'])} required modules")
     print(f"Unavailable non-loadable metadata headers: {missing}; not a byte-exact ELF reconstruction")

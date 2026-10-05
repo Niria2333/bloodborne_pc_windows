@@ -1,11 +1,17 @@
+// Windows port modifications by yaonikaixin999999, 2026-10-05.
 // SPDX-FileCopyrightText: Copyright 2024-2026 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <chrono>
+#ifdef __linux__
 #include <pthread.h>
 #include <sys/resource.h>
+#elif defined(_WIN32)
+#include <windows.h>
+#endif
 #include <time.h>
 #include "bbport_copy.h"
+#include "bbport_threads.h"
 #include "bbport_toggles.h"
 #include <cstdio>
 #include <boost/preprocessor/stringize.hpp>
@@ -102,12 +108,14 @@ void Liverpool::ProcessCommands() {
 
 void Liverpool::Process(std::stop_token stoken) {
     Common::SetCurrentThreadName("shadPS4:GpuCommandProcessor");
+#ifdef __linux__
     if (clockid_t clock; pthread_getcpuclockid(pthread_self(), &clock) == 0) {
         BbStats::gpu_thread_clock.store(static_cast<int>(clock));
     }
+#endif
     gpu_id = std::this_thread::get_id();
-#ifdef __linux__
-    gpu_tid = gettid();
+#if defined(__linux__) || defined(_WIN32)
+    gpu_tid = BbThreads::CurrentId();
 #endif
 
     while (!stoken.stop_requested()) {
@@ -1326,6 +1334,16 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
     }
     if (seq != NoSeq && BbStats::enabled) {
         BbStats::submissions.fetch_add(1, std::memory_order_relaxed);
+#ifdef _WIN32
+        FILETIME creation{}, exit{}, kernel{}, user{};
+        if (GetThreadTimes(GetCurrentThread(), &creation, &exit, &kernel, &user)) {
+            const auto us = [](const FILETIME& time) {
+                return ((u64(time.dwHighDateTime) << 32) | time.dwLowDateTime) / 10;
+            };
+            BbStats::gpu_user_us.store(us(user), std::memory_order_relaxed);
+            BbStats::gpu_sys_us.store(us(kernel), std::memory_order_relaxed);
+        }
+#else
         if (rusage usage{}; getrusage(RUSAGE_THREAD, &usage) == 0) {
             BbStats::gpu_user_us.store(u64(usage.ru_utime.tv_sec) * 1000000 + usage.ru_utime.tv_usec,
                                        std::memory_order_relaxed);
@@ -1335,6 +1353,7 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
             BbStats::gpu_vol_switches.store(usage.ru_nvcsw, std::memory_order_relaxed);
             BbStats::gpu_minor_faults.store(usage.ru_minflt, std::memory_order_relaxed);
         }
+#endif
     }
 
     FIBER_EXIT;

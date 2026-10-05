@@ -1,3 +1,4 @@
+// Windows port modifications by yaonikaixin999999, 2026-10-05.
 /* Guest file system: PS4 mount points mapped onto host directories.
  *   /app0, /hostapp  -> game package root (read-only by convention)
  *   /temp0, /download0, /data, and mounts added by SaveData -> user directory
@@ -8,7 +9,6 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#ifndef _WIN32
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -16,6 +16,79 @@
 #include <pthread.h>
 #include <unistd.h>
 #include <sys/stat.h>
+#ifdef _WIN32
+#include <windows.h>
+#include <io.h>
+#include <direct.h>
+/* UCRT descriptors must be binary and 64-bit: game archives can exceed 4 GiB. */
+#define stat _stat64
+#define fstat _fstat64
+#define mkdir(path,mode) _mkdir(path)
+#define O_CLOEXEC _O_NOINHERIT
+#define O_NONBLOCK 0
+#define O_SYNC 0
+#define O_DIRECTORY 0
+#define fsync _commit
+#define realpath(path,out) _fullpath(out,path,PATH_MAX)
+#define DT_UNKNOWN 0
+#define DT_DIR 4
+#define DT_REG 8
+#define DT_LNK 10
+static pthread_mutex_t positioned_lock=PTHREAD_MUTEX_INITIALIZER;
+static int windows_read(int fd,void *buffer,uint64_t size) {
+    if (size>UINT_MAX) { errno=EINVAL; return -1; }
+    pthread_mutex_lock(&positioned_lock);
+    int n=_read(fd,buffer,(unsigned)size),saved=errno;
+    pthread_mutex_unlock(&positioned_lock); errno=saved; return n;
+}
+static int windows_write(int fd,const void *buffer,uint64_t size) {
+    if (size>UINT_MAX) { errno=EINVAL; return -1; }
+    pthread_mutex_lock(&positioned_lock);
+    int n=_write(fd,buffer,(unsigned)size),saved=errno;
+    pthread_mutex_unlock(&positioned_lock); errno=saved; return n;
+}
+static int64_t windows_lseek(int fd,int64_t offset,int whence) {
+    pthread_mutex_lock(&positioned_lock);
+    int64_t n=_lseeki64(fd,offset,whence); int saved=errno;
+    pthread_mutex_unlock(&positioned_lock); errno=saved; return n;
+}
+static int windows_close(int fd) {
+    pthread_mutex_lock(&positioned_lock);
+    int n=_close(fd),saved=errno;
+    pthread_mutex_unlock(&positioned_lock); errno=saved; return n;
+}
+#define read windows_read
+#define write windows_write
+#define lseek windows_lseek
+#define close windows_close
+static int64_t positioned_io(int fd,void *buffer,uint64_t size,int64_t offset,int writing) {
+    if (offset<0 || size>UINT_MAX) { errno=EINVAL; return -1; }
+    pthread_mutex_lock(&positioned_lock);
+    int64_t previous=_lseeki64(fd,0,SEEK_CUR),result=-1;
+    if (previous>=0 && _lseeki64(fd,offset,SEEK_SET)>=0)
+        result=writing ? _write(fd,buffer,(unsigned)size) : _read(fd,buffer,(unsigned)size);
+    int saved=errno;
+    if (previous>=0 && _lseeki64(fd,previous,SEEK_SET)<0) { result=-1; saved=errno; }
+    pthread_mutex_unlock(&positioned_lock);
+    errno=saved; return result;
+}
+#define pread(fd,b,n,o) positioned_io(fd,b,n,o,0)
+#define pwrite(fd,b,n,o) positioned_io(fd,(void *)b,n,o,1)
+static int windows_ftruncate(int fd,int64_t size) {
+    if (size<0) { errno=EINVAL; return -1; }
+    pthread_mutex_lock(&positioned_lock);
+    int e=_chsize_s(fd,size);
+    pthread_mutex_unlock(&positioned_lock);
+    if (e) { errno=e; return -1; } return 0;
+}
+#define ftruncate windows_ftruncate
+static int windows_truncate(const char *path,int64_t size) {
+    int fd=_open(path,_O_RDWR|_O_BINARY);
+    if (fd<0) return -1;
+    int r=windows_ftruncate(fd,size),saved=errno; _close(fd); errno=saved; return r;
+}
+#define truncate windows_truncate
+#endif
 #define ERR(n) ((int32_t)(UINT32_C(0x80020000)|(n)))
 #define MAX_FILES 1024
 #define MAX_MOUNTS 16
@@ -84,6 +157,9 @@ static int translate(const char *guest,char *out,size_t size) {
     char buffer[1024];
     if (guest[0]!='/') snprintf(buffer,sizeof(buffer),"/app0/%s",guest);
     else snprintf(buffer,sizeof(buffer),"%s",guest);
+#ifdef _WIN32
+    if (strchr(buffer,'\\') || strchr(buffer,':')) return EACCES;
+#endif
     for (const char *p=buffer;(p=strstr(p,".."));p+=2)
         if ((p==buffer || p[-1]=='/') && (p[2]==0 || p[2]=='/')) return EACCES;
     pthread_mutex_lock(&lock);
@@ -109,6 +185,9 @@ static int host_flags(int flags) {
     if (flags&0x400) r|=O_TRUNC;
     if (flags&0x800) r|=O_EXCL;
     if (flags&0x20000) r|=O_DIRECTORY;
+#ifdef _WIN32
+    r|=O_BINARY;
+#endif
     return r|O_CLOEXEC;
 }
 static void free_listing(Listing *l) { if (l) { free(l->names); free(l->offsets); free(l->types); free(l); } }
@@ -129,10 +208,19 @@ static Listing *list_directory(const char *path) {
         if (!l->offsets || !l->types || !l->names) { fputs("Out of memory listing directory\n",stderr); exit(1); }
         memcpy(l->names+bytes,e->d_name,n);
         l->offsets[l->count]=bytes;
+#ifdef _WIN32
+        unsigned char type=DT_UNKNOWN;
+#else
         unsigned char type=e->d_type;
+#endif
         if (type==DT_LNK || type==DT_UNKNOWN) {
             struct stat entry;
+#ifdef _WIN32
+            char full[2048]; snprintf(full,sizeof(full),"%s/%s",path,e->d_name);
+            if (!stat(full,&entry))
+#else
             if (!fstatat(dirfd(d),e->d_name,&entry,0))
+#endif
                 type=S_ISDIR(entry.st_mode) ? DT_DIR : S_ISREG(entry.st_mode) ? DT_REG : type;
         }
         l->types[l->count]=type==DT_DIR ? 4 : type==DT_REG ? 8 : type==DT_LNK ? 10 : 0;
@@ -145,10 +233,18 @@ static void convert_stat(const struct stat *s,GuestStat *g) {
     memset(g,0,sizeof(*g));
     g->dev=(uint32_t)s->st_dev; g->ino=(uint32_t)s->st_ino;
     g->mode=(uint16_t)s->st_mode; g->nlink=(uint16_t)s->st_nlink;
-    g->size=s->st_size; g->blocks=s->st_blocks; g->blksize=(uint32_t)s->st_blksize;
+    g->size=s->st_size;
+#ifdef _WIN32
+    g->blocks=(s->st_size+511)/512; g->blksize=4096;
+    g->atime=(GuestTimespec){s->st_atime,0};
+    g->mtime=(GuestTimespec){s->st_mtime,0};
+    g->ctime=(GuestTimespec){s->st_ctime,0};
+#else
+    g->blocks=s->st_blocks; g->blksize=(uint32_t)s->st_blksize;
     g->atime=(GuestTimespec){s->st_atim.tv_sec,s->st_atim.tv_nsec};
     g->mtime=(GuestTimespec){s->st_mtim.tv_sec,s->st_mtim.tv_nsec};
     g->ctime=(GuestTimespec){s->st_ctim.tv_sec,s->st_ctim.tv_nsec};
+#endif
     g->birthtime=g->ctime;
 }
 static File *get(int fd) {
@@ -170,15 +266,27 @@ static int64_t do_open(const char *guest,int flags,int mode) {
     char path[1024];
     int e=translate(guest,path,sizeof(path));
     if (e) return -e;
+    struct stat s;
+    Listing *dir=NULL;
+#ifdef _WIN32
+    int is_dir=!stat(path,&s) && S_ISDIR(s.st_mode);
+    if ((flags&0x20000) && !is_dir) return -ENOTDIR;
+    int host=is_dir ? -2 : open(path,host_flags(flags),mode ? mode : 0644);
+    if (is_dir) dir=list_directory(path);
+    if (is_dir && !dir) return -errno;
+#else
     int host=open(path,host_flags(flags),mode ? mode : 0644);
-    if (host<0) {
+#endif
+    if (host<0 && !dir) {
         e=errno;
         if (e==ENOENT) { ++missing; printf("Runtime: open(%s) -> not found\n",guest); }
         return -e;
     }
-    struct stat s;
-    Listing *dir=NULL;
+#ifndef _WIN32
     if (!fstat(host,&s) && S_ISDIR(s.st_mode)) dir=list_directory(path);
+#else
+    if (!dir) fstat(host,&s);
+#endif
     pthread_mutex_lock(&lock);
     int fd=-1;
     for (int i=3;i<MAX_FILES;++i) if (!files[i].used) { fd=i; break; }
@@ -206,7 +314,8 @@ static int64_t do_close(int fd) {
     pthread_mutex_lock(&lock);
     File *f=get(fd);
     if (!f) { pthread_mutex_unlock(&lock); return -EBADF; }
-    close(f->host); free_listing(f->dir);
+    if (f->host>=0) close(f->host);
+    free_listing(f->dir);
     *f=(File){0};
     pthread_mutex_unlock(&lock);
     return 0;
@@ -272,6 +381,17 @@ static int64_t do_lseek(int fd,int64_t offset,int whence) {
     return r<0 ? -errno : r;
 }
 static int64_t do_fstat(int fd,GuestStat *out) {
+#ifdef _WIN32
+    File *file=get(fd);
+    if (file && file->dir) {
+        if (!out) return -EFAULT;
+        char path[1024]; struct stat st;
+        int e=translate(file->path,path,sizeof(path));
+        if (e) return -e;
+        if (stat(path,&st)) return -errno;
+        convert_stat(&st,out); return 0;
+    }
+#endif
     int h=host_fd(fd);
     if (h<0) return -EBADF;
     if (!out) return -EFAULT;
@@ -317,6 +437,9 @@ static int64_t do_getdents(int fd,char *buffer,uint64_t size,int64_t *basep) {
     return result;
 }
 static int64_t path_op(const char *guest,int op,int mode) {
+#ifdef _WIN32
+    (void)mode;
+#endif
     if (game_path(guest)) return -EROFS;
     char path[1024];
     int e=translate(guest,path,sizeof(path));
@@ -419,8 +542,3 @@ void runtime_file_report(void) {
     printf("Runtime: files opened=%zu, reads=%zu (%llu bytes), writes=%zu, not found=%zu\n",
            opens,reads,(unsigned long long)bytes_read,writes,missing);
 }
-#else
-uintptr_t runtime_file_resolve(const char *name) { (void)name; return 0; }
-void runtime_file_report(void) {}
-void runtime_file_configure(const char *a,const char *u) { (void)a; (void)u; }
-#endif

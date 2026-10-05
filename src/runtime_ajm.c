@@ -1,3 +1,4 @@
+// Windows port modifications by yaonikaixin999999, 2026-10-05.
 /* libSceAjm: audio decoder batches. Batches use the SDK chunk format (the
  * builder functions are imports, but games may also build chunks inline), and
  * run synchronously at submission: decoding a batch takes well under a
@@ -69,7 +70,11 @@ typedef struct {
 typedef struct { int used, registered[24]; Instance instances[MAX_INSTANCES+1]; } Context;
 typedef struct { int used, context, canceled; } Batch;
 
+#ifdef _WIN32
+static pthread_mutex_t lock=PTHREAD_RECURSIVE_MUTEX_INITIALIZER;
+#else
 static pthread_mutex_t lock=PTHREAD_RECURSIVE_MUTEX_INITIALIZER_NP;
+#endif
 static Context *contexts[MAX_CONTEXTS+1];
 static Batch batches[MAX_BATCHES];
 static size_t jobs_run, frames_decoded, batches_run;

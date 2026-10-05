@@ -1,3 +1,4 @@
+// Windows port modifications by yaonikaixin999999, 2026-10-05.
 /* libSceSaveData on host directories:
  *   <user>/savedata/<user id>/<title id>/<dir name>/        files the game writes
  *   <user>/savedata/<user id>/<title id>/<dir name>.sce_sys/ param.bin, icon0.png
@@ -11,12 +12,19 @@
 #include <string.h>
 #include <pthread.h>
 #include <time.h>
-#ifndef _WIN32
 #include <dirent.h>
 #include <errno.h>
+#ifndef _WIN32
 #include <ftw.h>
+#endif
 #include <sys/stat.h>
 #include <unistd.h>
+#ifdef _WIN32
+#include <windows.h>
+#include <direct.h>
+#define mkdir(path,mode) _mkdir(path)
+#define stat _stat64
+#endif
 
 #define ERR_PARAMETER ((int32_t)0x809F0000)
 #define ERR_NOT_INITIALIZED ((int32_t)0x809F0001)
@@ -134,9 +142,29 @@ static int read_param(const char *meta, Param *p) {
     if (!stat(path,&st)) p->mtime=st.st_mtime;
     return n==1 ? 0 : -1;
 }
+#ifdef _WIN32
+/* Do not follow junctions/symlinks while deleting one guest save directory. */
+static int remove_tree(const char *path) {
+    DWORD attrs=GetFileAttributesA(path);
+    if (attrs==INVALID_FILE_ATTRIBUTES) return -1;
+    if (!(attrs&FILE_ATTRIBUTE_DIRECTORY)) return remove(path);
+    if (attrs&FILE_ATTRIBUTE_REPARSE_POINT) return RemoveDirectoryA(path) ? 0 : -1;
+    DIR *dir=opendir(path); if (!dir) return -1;
+    int result=0;
+    for (struct dirent *e;(e=readdir(dir));) {
+        if (!strcmp(e->d_name,".") || !strcmp(e->d_name,"..")) continue;
+        char child[2048]; snprintf(child,sizeof(child),"%s/%s",path,e->d_name);
+        if (remove_tree(child)) result=-1;
+    }
+    closedir(dir);
+    if (rmdir(path)) result=-1;
+    return result;
+}
+#else
 static int remove_entry(const char *path, const struct stat *st, int flag, struct FTW *ftw) {
     (void)st; (void)flag; (void)ftw; return remove(path);
 }
+#endif
 
 static ABI int32_t save_initialize(const void *param) { (void)param; initialized=1; return 0; }
 static ABI int32_t save_terminate(void) {
@@ -246,8 +274,13 @@ static ABI int32_t save_delete(const Delete *d) {
     snprintf(meta,sizeof(meta),"%s/%s.sce_sys",base,d->dir->data);
     struct stat st;
     if (stat(host,&st)) return ERR_NOT_FOUND;
+#ifdef _WIN32
+    if (remove_tree(host)) return ERR_INTERNAL;
+    if (GetFileAttributesA(meta)!=INVALID_FILE_ATTRIBUTES && remove_tree(meta)) return ERR_INTERNAL;
+#else
     nftw(host,remove_entry,16,FTW_DEPTH|FTW_PHYS);
     nftw(meta,remove_entry,16,FTW_DEPTH|FTW_PHYS);
+#endif
     printf("Runtime: save data '%s' deleted\n",d->dir->data);
     return 0;
 }
@@ -351,8 +384,3 @@ static const RuntimeExport exports[]={
 };
 uintptr_t runtime_savedata_resolve(const char *name) { return RUNTIME_LOOKUP(exports,name); }
 void runtime_savedata_report(void) { printf("Runtime: save data mounts=%zu, memory writes=%zu\n",mounts_done,memory_writes); }
-#else
-void runtime_savedata_configure(const char *title) { (void)title; }
-uintptr_t runtime_savedata_resolve(const char *name) { (void)name; return 0; }
-void runtime_savedata_report(void) {}
-#endif

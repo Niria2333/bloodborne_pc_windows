@@ -1,3 +1,4 @@
+// Windows port modifications by yaonikaixin999999, 2026-10-05.
 // bbport: optimizations that can be switched off while the game runs (BB_TOGGLE_FILE,
 // see runtime_memory.c), to find which one changes rendering without restarting.
 #pragma once
@@ -9,7 +10,11 @@
 
 extern "C" std::uint64_t runtime_disabled_optimizations;
 /// Recovery point for speculative guest memory reads on this thread (runtime_memory.c).
+#ifdef _WIN32
+extern "C" __thread jmp_buf* runtime_fault_recover;
+#else
 extern "C" __thread sigjmp_buf* runtime_fault_recover;
+#endif
 
 namespace BbToggle {
 enum : std::uint64_t {

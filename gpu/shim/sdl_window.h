@@ -1,9 +1,8 @@
+// Windows port modifications by yaonikaixin999999, 2026-10-05.
 // bbport: the game window. Created by the VideoOut driver on first open; the
 // event pump runs on the port's window thread (see window.cpp).
 #pragma once
 #include <atomic>
-#include <mutex>
-#include <string>
 #include "common/types.h"
 
 struct SDL_Window;
@@ -30,19 +29,10 @@ public:
     bool IsOpen() const { return is_open.load(std::memory_order_relaxed); }
     /// Processes pending window events. Returns false once the user closed the window.
     bool PollEvents();
-    /// Keyboard text entry for the system IME dialog; typed text shows in the title bar.
-    void BeginTextInput(const std::string& initial, const std::string& prompt);
-    /// 0 while typing, 1 confirmed (Enter), 2 cancelled (Escape); text is UTF-8.
-    int PollTextInput(std::string& text);
 
 private:
     std::atomic<s32> width, height;
     std::atomic<bool> is_open{true};
-    std::mutex text_mutex;
-    bool text_requested{}, text_active{};
-    int text_state{};
-    std::string text, text_prompt, base_title;
-    void UpdateTextTitle();
     SDL_Window* window{};
     WindowSystemInfo window_info{};
 };

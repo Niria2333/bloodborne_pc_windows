@@ -1,3 +1,4 @@
+// Windows port modifications by yaonikaixin999999, 2026-10-05.
 // SPDX-FileCopyrightText: Copyright 2025 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
@@ -6,8 +7,10 @@
 #include <cstdio>
 #include <cstdlib>
 #include <unordered_map>
-#include <dlfcn.h>
 #include <functional>
+#ifndef _WIN32
+#include <dlfcn.h>
+#endif
 
 #include "bbport_copy.h"
 #include "video_core/renderer_vulkan/vk_gpu_profiler.h"
@@ -152,6 +155,19 @@ void Scheduler::TraceDirectRecording(void* caller) {
     }
     std::ranges::sort(top, std::greater{});
     for (size_t i = 0; i < std::min<size_t>(top.size(), 8); ++i) {
+#ifdef _WIN32
+        HMODULE module = nullptr;
+        char module_name[MAX_PATH] = "?";
+        if (GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+                                  GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                              static_cast<LPCSTR>(top[i].second), &module)) {
+            GetModuleFileNameA(module, module_name, sizeof(module_name));
+        }
+        std::printf("Recorder sync caller: %llu x %s+0x%llx\n",
+                    static_cast<unsigned long long>(top[i].first), module_name,
+                    static_cast<unsigned long long>(reinterpret_cast<uintptr_t>(top[i].second) -
+                                                     reinterpret_cast<uintptr_t>(module)));
+#else
         Dl_info info{};
         dladdr(top[i].second, &info);
         std::printf("Recorder sync caller: %llu x %s+0x%lx\n",
@@ -159,6 +175,7 @@ void Scheduler::TraceDirectRecording(void* caller) {
                     info.dli_fname ? info.dli_fname : "?",
                     static_cast<unsigned long>(reinterpret_cast<uintptr_t>(top[i].second) -
                                                reinterpret_cast<uintptr_t>(info.dli_fbase)));
+#endif
     }
     callers.clear();
 }

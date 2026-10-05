@@ -1,3 +1,4 @@
+# Windows port modifications by yaonikaixin999999, 2026-10-05.
 """Link the user's plaintext libc into a separate, reproducible probe image.
 
 The original boot.bin remains usable. Symbols are matched by library/module
@@ -8,7 +9,33 @@ import hashlib
 import json
 from pathlib import Path
 import struct
+import sys
 from prepare import parse_self, span, unpack
+
+FS_LOAD = bytes.fromhex('64488b042500000000')  # mov rax, fs:[0]
+
+
+def patch_fs_loads(image, ph, base=0, target='linux'):
+    """Redirect thread-pointer loads while preserving Windows' GS/TEB base.
+
+    NT_TIB.ArbitraryUserPointer at GS:[0x28] holds the Windows guest TCB;
+    Linux instead gives GS its own guest base. Instruction size stays fixed.
+    """
+    if target not in ('linux', 'windows'):
+        raise ValueError(f'unsupported TLS target: {target}')
+    replacement = bytes.fromhex('65488b042528000000' if target == 'windows'
+                                else '65488b042500000000')
+    patched = 0
+    for p in ph:
+        if p['type'] != 1 or not p['flags'] & 1:
+            continue
+        start, end = base + p['vaddr'], base + p['vaddr'] + p['filesz']
+        at = image.find(FS_LOAD, start, end)
+        while at >= 0:
+            image[at:at + len(FS_LOAD)] = replacement
+            patched += 1
+            at = image.find(FS_LOAD, at + len(FS_LOAD), end)
+    return patched
 
 
 def encode_id(value):
@@ -71,7 +98,8 @@ def module(path):
                 sha256=hashlib.sha256(source).hexdigest(), missing=missing)
 
 
-def link(game, out):
+def link(game, out,target='linux'):
+    tls_target=target
     main = module(game/'eboot.bin')
     libc = module(game/'sce_module/libc.prx')
     raw = (out/'boot.bin').read_bytes()
@@ -157,21 +185,10 @@ def link(game, out):
         if identity in exports:
             s = exports[identity]
             bindings.append((index,base+s['value'],2 if s['type']==1 else 1))
-    # The eboot reads its thread pointer with `mov rax, fs:[0]` (initial-exec
-    # TLS). glibc owns FS on Linux, so rewrite the segment prefix to GS; the
-    # runtime points GS at each guest thread's TCB. Only executable eboot
-    # segments are scanned, and only this exact 9-byte instruction.
-    fs_load = bytes.fromhex('64488b042500000000')
-    patched = 0
-    for p in main['ph']:
-        if p['type'] != 1 or not p['flags'] & 1:
-            continue
-        start, end = p['vaddr'], p['vaddr'] + p['filesz']
-        at = image.find(fs_load, start, end)
-        while at >= 0:
-            image[at] = 0x65
-            patched += 1
-            at = image.find(fs_load, at + len(fs_load), end)
+    # Redirect exact initial-exec TLS loads in executable game/module segments
+    # through the selected host platform's guest thread-pointer bridge.
+    patched = patch_fs_loads(image, main['ph'], target=tls_target)
+    patched += patch_fs_loads(image, libc['ph'], base, tls_target)
     main_tls = next((p for p in main['ph'] if p['type']==7), None)
     main_tls_values = (main_tls['vaddr'], main_tls['filesz'], main_tls['memsz'], main_tls['align']) if main_tls else (0,0,0,0)
     if main_tls and (main_tls['filesz'] > main_tls['memsz'] or main_tls['memsz'] > 1024*1024
@@ -194,19 +211,20 @@ def link(game, out):
         for relocation in relocs: f.write(struct.pack('<QQqq',*relocation))
         f.write(image)
     report = dict(base=hex(base),size=libsize,sha256=libc['sha256'],init=hex(metadata[2]),
-                  bindings=len(bindings),tls_module_id=2,fs_loads_patched=patched,
+                  bindings=len(bindings),tls_module_id=2,fs_loads_patched=patched,tls_target=tls_target,
                   main_tls=dict(zip(('vaddr','filesz','memsz','align'),main_tls_values)),tls_relocations=tls_count,
                   tls_template_bytes=tls['filesz'],tls_memory_bytes=tls['memsz'],
                   imports=names,relocation_counts=dict(collections.Counter(r[1] for r in libc['relocs'])),
                   symbol_bindings=[dict(import_name=names[i],address=hex(a),kind=k) for i,a,k in bindings])
     (out/'libc-link.json').write_text(json.dumps(report,indent=2)+'\n')
     print(f'Linked native libc: base={base:#x}, {len(bindings)} fallback exports, TLS={tls["memsz"]} bytes; '
-          f'eboot TLS={main_tls_values[2]} bytes, fs->gs patched={patched}')
+          f'eboot TLS={main_tls_values[2]} bytes, {tls_target} TLS loads patched={patched}')
 
 
 if __name__=='__main__':
     import argparse
     p=argparse.ArgumentParser(description=__doc__)
     p.add_argument('game',type=Path);p.add_argument('--out',type=Path,default=Path(__file__).resolve().parent.parent/'out')
+    p.add_argument('--target', choices=('linux','windows'), default='windows' if sys.platform=='win32' else 'linux')
     a=p.parse_args()
-    link(a.game,a.out)
+    link(a.game,a.out,a.target)

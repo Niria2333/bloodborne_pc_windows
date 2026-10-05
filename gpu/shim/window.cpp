@@ -1,4 +1,5 @@
-// bbport: SDL3 window for the Vulkan swapchain (X11 or Wayland).
+// Windows port modifications by yaonikaixin999999, 2026-10-05.
+// bbport: SDL3 window for the Vulkan swapchain (Win32, X11 or Wayland).
 #include <cstdlib>
 #include <cstring>
 #include <SDL3/SDL.h>
@@ -24,14 +25,17 @@ WindowSDL::WindowSDL(s32 width_, s32 height_, const char* title) : width{width_}
     SDL_SetBooleanProperty(props, SDL_PROP_WINDOW_CREATE_VULKAN_BOOLEAN, true);
     const char* fullscreen = std::getenv("BB_FULLSCREEN");
     SDL_SetBooleanProperty(props, SDL_PROP_WINDOW_CREATE_FULLSCREEN_BOOLEAN, fullscreen && fullscreen[0] == '1');
-    base_title = title;
     window = SDL_CreateWindowWithProperties(props);
     SDL_DestroyProperties(props);
     ASSERT_MSG(window, "Failed to create window: {}", SDL_GetError());
 
     const char* driver = SDL_GetCurrentVideoDriver();
     const SDL_PropertiesID wp = SDL_GetWindowProperties(window);
-    if (driver && !std::strcmp(driver, "x11")) {
+    if (driver && !std::strcmp(driver, "windows")) {
+        window_info.type = WindowSystemType::Windows;
+        window_info.render_surface = SDL_GetPointerProperty(wp, SDL_PROP_WINDOW_WIN32_HWND_POINTER, nullptr);
+        ASSERT_MSG(window_info.render_surface, "SDL did not provide a Win32 window handle");
+    } else if (driver && !std::strcmp(driver, "x11")) {
         window_info.type = WindowSystemType::X11;
         window_info.display_connection = SDL_GetPointerProperty(wp, SDL_PROP_WINDOW_X11_DISPLAY_POINTER, nullptr);
         window_info.render_surface = reinterpret_cast<void*>(SDL_GetNumberProperty(wp, SDL_PROP_WINDOW_X11_WINDOW_NUMBER, 0));
@@ -53,57 +57,10 @@ WindowSDL::~WindowSDL() {
     SDL_DestroyWindow(window);
 }
 
-void WindowSDL::BeginTextInput(const std::string& initial, const std::string& prompt) {
-    std::scoped_lock lock{text_mutex};
-    text = initial;
-    text_prompt = prompt;
-    text_state = 0;
-    text_requested = true;
-}
-
-int WindowSDL::PollTextInput(std::string& out) {
-    std::scoped_lock lock{text_mutex};
-    out = text;
-    return text_state;
-}
-
-void WindowSDL::UpdateTextTitle() {
-    const std::string title = text_active ? base_title + " \u2014 " + text_prompt + ": " + text + "_  (Enter = OK, Esc = cancel)"
-                                          : base_title;
-    SDL_SetWindowTitle(window, title.c_str());
-}
-
 bool WindowSDL::PollEvents() {
-    {
-        std::scoped_lock lock{text_mutex};
-        if (text_requested) { // SDL text input must be toggled from the window thread
-            text_requested = false;
-            text_active = true;
-            SDL_StartTextInput(window);
-            UpdateTextTitle();
-        }
-    }
-    if (!text_active) {
-        BbOverlay::UpdateTextInput(window);
-    }
+    BbOverlay::UpdateTextInput(window);
     SDL_Event event;
     while (SDL_PollEvent(&event)) {
-        if (text_active && (event.type == SDL_EVENT_TEXT_INPUT || event.type == SDL_EVENT_KEY_DOWN)) {
-            std::scoped_lock lock{text_mutex};
-            if (event.type == SDL_EVENT_TEXT_INPUT) {
-                text += event.text.text;
-            } else if (event.key.key == SDLK_BACKSPACE && !text.empty()) {
-                size_t cut = text.size() - 1; // drop one UTF-8 code point
-                while (cut > 0 && (static_cast<unsigned char>(text[cut]) & 0xC0) == 0x80) --cut;
-                text.erase(cut);
-            } else if (event.key.key == SDLK_RETURN || event.key.key == SDLK_KP_ENTER || event.key.key == SDLK_ESCAPE) {
-                text_state = event.key.key == SDLK_ESCAPE ? 2 : 1;
-                text_active = false;
-                SDL_StopTextInput(window);
-            }
-            UpdateTextTitle();
-            continue;
-        }
         if (BbOverlay::HandleEvent(event)) {
             continue;
         }

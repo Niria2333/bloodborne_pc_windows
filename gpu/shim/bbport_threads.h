@@ -1,3 +1,4 @@
+// Windows port modifications by yaonikaixin999999, 2026-10-05.
 // SPDX-License-Identifier: GPL-2.0-or-later
 // bbport: helper thread sizing. Counts follow the hardware threads this process may run on
 // (the affinity mask, so `taskset` can emulate a Steam Deck), and speculative helpers run as
@@ -6,29 +7,55 @@
 #pragma once
 
 #include <algorithm>
+#include <bit>
+#include <thread>
+#ifdef _WIN32
+#include "bbport_windows.h"
+#else
 #include <sched.h>
 #include <sys/resource.h>
-#include <thread>
 #include <unistd.h>
+#endif
 
 namespace BbThreads {
 
+inline unsigned CurrentId() {
+#ifdef _WIN32
+    return GetCurrentThreadId();
+#else
+    return static_cast<unsigned>(gettid());
+#endif
+}
+
 /// Hardware threads available to the process.
 inline unsigned Available() {
+#ifdef _WIN32
+    DWORD_PTR process_mask = 0, system_mask = 0;
+    if (GetProcessAffinityMask(GetCurrentProcess(), &process_mask, &system_mask)) {
+        return std::max(1, std::popcount(process_mask));
+    }
+#else
     cpu_set_t set;
     CPU_ZERO(&set);
     if (sched_getaffinity(0, sizeof(set), &set) == 0) {
         return std::max(1, CPU_COUNT(&set));
     }
+#endif
     return std::max(1u, std::thread::hardware_concurrency());
 }
 
 /// The calling thread only runs on otherwise idle cores (falls back to the lowest nice level).
 inline void MakeBackground() {
+#ifdef _WIN32
+    if (!SetThreadPriority(GetCurrentThread(), THREAD_MODE_BACKGROUND_BEGIN)) {
+        SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_IDLE);
+    }
+#else
     sched_param param{};
     if (sched_setscheduler(0, SCHED_IDLE, &param) != 0) {
         setpriority(PRIO_PROCESS, static_cast<id_t>(gettid()), 19);
     }
+#endif
 }
 
 } // namespace BbThreads

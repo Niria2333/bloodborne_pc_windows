@@ -1,14 +1,17 @@
+// Windows port modifications by yaonikaixin999999, 2026-10-05.
 #ifndef BB_RUNTIME_H
 #define BB_RUNTIME_H
 #include <stdint.h>
 #include <stddef.h>
-#ifndef _WIN32
 #include <setjmp.h>
 /* Recovery point for speculative guest memory reads on this thread (probe.c fault handler). */
+#ifdef _WIN32
+extern __thread jmp_buf *runtime_fault_recover;
+#else
 extern __thread sigjmp_buf *runtime_fault_recover;
+#endif
 /* Restarts the game (in-game settings menu, render resolution change). */
 void runtime_restart(void);
-#endif
 #define ABI __attribute__((sysv_abi))
 typedef void (ABI *GuestCallback)(void);
 void runtime_start(uint64_t capabilities);

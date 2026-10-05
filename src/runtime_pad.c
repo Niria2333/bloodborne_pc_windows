@@ -1,5 +1,8 @@
+// Windows port modifications by yaonikaixin999999, 2026-10-05.
 /* libScePad on SDL3 gamepads, with a keyboard fallback. SDL events are pumped
  * by the window thread (gpu/shim/window.cpp); here state is only sampled.
+ * BB_PAD_LAYOUT=xbox maps A/B/X/Y to Circle/Cross/Triangle/Square; the
+ * default (ps4) uses the physical PlayStation button positions.
  *
  * Keyboard layout (when no gamepad is connected):
  *   WASD left stick, arrow keys right stick, Space Cross, LShift Circle,
@@ -99,9 +102,18 @@ static void sample_host(PadData *d) {
     if (bbgpu_overlay_captures_input()) return; /* settings menu open: neutral input */
     const bool *k=SDL_WasInit(SDL_INIT_VIDEO) ? SDL_GetKeyboardState(NULL) : NULL;
     if (g) {
+        const char *layout=getenv("BB_PAD_LAYOUT");
+        const int xbox=layout && !strcmp(layout,"xbox");
+        static const struct { SDL_GamepadButton sdl; uint32_t ps4, xbox; } face_map[]={
+            {SDL_GAMEPAD_BUTTON_SOUTH,BTN_CROSS,BTN_CIRCLE},
+            {SDL_GAMEPAD_BUTTON_EAST,BTN_CIRCLE,BTN_CROSS},
+            {SDL_GAMEPAD_BUTTON_WEST,BTN_SQUARE,BTN_TRIANGLE},
+            {SDL_GAMEPAD_BUTTON_NORTH,BTN_TRIANGLE,BTN_SQUARE},
+        };
+        for (size_t i=0;i<sizeof(face_map)/sizeof(*face_map);++i)
+            if (SDL_GetGamepadButton(g,face_map[i].sdl))
+                d->buttons|=xbox ? face_map[i].xbox : face_map[i].ps4;
         static const struct { SDL_GamepadButton sdl; uint32_t ps; } map[]={
-            {SDL_GAMEPAD_BUTTON_SOUTH,BTN_CROSS}, {SDL_GAMEPAD_BUTTON_EAST,BTN_CIRCLE},
-            {SDL_GAMEPAD_BUTTON_WEST,BTN_SQUARE}, {SDL_GAMEPAD_BUTTON_NORTH,BTN_TRIANGLE},
             {SDL_GAMEPAD_BUTTON_LEFT_SHOULDER,BTN_L1}, {SDL_GAMEPAD_BUTTON_RIGHT_SHOULDER,BTN_R1},
             {SDL_GAMEPAD_BUTTON_LEFT_STICK,BTN_L3}, {SDL_GAMEPAD_BUTTON_RIGHT_STICK,BTN_R3},
             {SDL_GAMEPAD_BUTTON_START,BTN_OPTIONS}, {SDL_GAMEPAD_BUTTON_BACK,BTN_TOUCHPAD},
@@ -168,8 +180,13 @@ static void read_inject(void) {
     last_check=now;
     struct stat st;
     if (stat(path,&st)!=0) return;
+#ifdef _WIN32
+    if (st.st_mtime==mtime.tv_sec) return;
+    mtime=(struct timespec){st.st_mtime,0};
+#else
     if (st.st_mtim.tv_sec==mtime.tv_sec && st.st_mtim.tv_nsec==mtime.tv_nsec) return;
     mtime=st.st_mtim;
+#endif
     FILE *f=fopen(path,"r");
     if (!f) return;
     static const struct { const char *name; uint32_t ps; } names[]={

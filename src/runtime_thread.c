@@ -1,27 +1,50 @@
+// Windows port modifications by yaonikaixin999999, 2026-10-05.
 /* Guest threads on host pthreads. Each guest thread owns a FreeBSD-style TCB
  * (variant II: static TLS below the TCB). The loader rewrites the eboot's
- * `mov rax, fs:[0]` into `mov rax, gs:[0]`, so GS base = guest TCB while glibc
- * keeps FS. Priorities/affinity are recorded, not enforced by a PS4 scheduler. */
+ * `mov rax, fs:[0]` into GS:[0] on Linux, or GS:[0x28] on Windows. Windows
+ * keeps its GS base (the TEB); NT_TIB.ArbitraryUserPointer holds the guest TCB.
+ * Priorities/affinity are recorded, not enforced by a PS4 scheduler. */
 #define _GNU_SOURCE
 #include "runtime.h"
+#include "native_stack.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#ifndef _WIN32
 #include <pthread.h>
 #include <sched.h>
 #include <setjmp.h>
 #include <errno.h>
+#ifdef _WIN32
+#include <windows.h>
+#else
 #include <unistd.h>
 #include <sys/syscall.h>
 #include <sys/mman.h>
 #include <asm/prctl.h>
+#endif
 #define ERR(n) ((int32_t)(UINT32_C(0x80020000)|(n)))
 #define ATTR_MAGIC UINT32_C(0x41545452)
 #define STACK_MARGIN (256*1024)
 #define MIN_STACK (64*1024)
 #define DEFAULT_STACK (1024*1024)
 #define DEFAULT_PRIO 700
+
+/* enter_on_stack(entry,arg0,arg1,stack_top): invoke the SysV guest on its
+ * own low-address stack. All executables already link this thread runtime. */
+__asm__(".text\n.globl enter_on_stack\nenter_on_stack:\n"
+        " push %rbp\n mov %rsp,%rbp\n and $-16,%rcx\n"
+#ifdef _WIN32
+        /* Exception dispatch and _chkstk must see the active stack bounds. */
+        " pushq %gs:0x8\n pushq %gs:0x10\n"
+        " mov %rcx,%gs:0x8\n mov %r8,%gs:0x10\n"
+#endif
+        " mov %rcx,%rsp\n"
+        " mov %rdi,%rax\n mov %rsi,%rdi\n mov %rdx,%rsi\n call *%rax\n"
+#ifdef _WIN32
+        " mov -8(%rbp),%rdx\n mov %rdx,%gs:0x8\n"
+        " mov -16(%rbp),%rdx\n mov %rdx,%gs:0x10\n"
+#endif
+        " mov %rbp,%rsp\n pop %rbp\n ret\n");
 
 typedef void *(ABI *GuestEntry)(void *);
 typedef struct ThreadAttr {
@@ -40,7 +63,12 @@ typedef struct GuestThread {
     ThreadAttr attr;
     char name[32];
     int detached, finished, joined, host_owned;
+#ifdef _WIN32
+    intptr_t exit_jump[5]; /* GCC builtins avoid SEH unwinding through guest code. */
+    void *previous_tcb;
+#else
     jmp_buf exit_jump;
+#endif
     struct GuestThread *next;
 } GuestThread;
 
@@ -57,14 +85,38 @@ void runtime_set_main_tls(const void *data,uint64_t filesz,uint64_t memsz,uint64
     tls_template=data; tls_filesz=filesz; tls_memsz=memsz; tls_align=align ? align : 16;
 }
 static uint64_t tls_offset(void) { return (tls_memsz+tls_align-1)&~(tls_align-1); }
-static void set_gs(void *base) {
+static void set_guest_tcb(void *base) {
+#ifdef _WIN32
+    __asm__ volatile("movq %0, %%gs:0x28" : : "r"(base) : "memory");
+#else
     if (syscall(SYS_arch_prctl,ARCH_SET_GS,(unsigned long)base)) { perror("STOP: arch_prctl(ARCH_SET_GS)"); exit(21); }
+#endif
 }
-/* Build TCB/static TLS for the calling host thread and point GS at it. */
+static void *guest_alloc(size_t size) {
+#ifdef _WIN32
+    return runtime_low_map((size+4095)&~(size_t)4095,3);
+#else
+    return calloc(1,size);
+#endif
+}
+static void guest_free(void *p) {
+#ifdef _WIN32
+    if (p) VirtualFree(p,0,MEM_RELEASE);
+#else
+    free(p);
+#endif
+}
+/* Build TCB/static TLS for the calling host thread. */
 static void attach(GuestThread *t) {
     uint64_t offset=tls_offset();
     size_t total=offset+256;
-    unsigned char *block=aligned_alloc(64,(total+63)&~(size_t)63);
+    unsigned char *block;
+#ifdef _WIN32
+    block=guest_alloc(total);
+    __asm__ volatile("movq %%gs:0x28, %0" : "=r"(t->previous_tcb));
+#else
+    block=aligned_alloc(64,(total+63)&~(size_t)63);
+#endif
     if (!block) { fputs("Cannot allocate guest TLS\n",stderr); exit(1); }
     memset(block,0,total);
     if (tls_filesz) memcpy(block,tls_template,tls_filesz);
@@ -74,11 +126,11 @@ static void attach(GuestThread *t) {
     tcb[1]=(uint64_t)(uintptr_t)dtv;         /* tcb_dtv (static module only) */
     tcb[2]=(uint64_t)(uintptr_t)t;           /* tcb_thread */
     t->tls_block=block; t->tcb=tcb;
-    set_gs(tcb);
+    set_guest_tcb(tcb);
     current=t;
 }
 static GuestThread *new_thread(void) {
-    GuestThread *t=calloc(1,sizeof(*t));
+    GuestThread *t=guest_alloc(sizeof(*t));
     if (!t) return NULL;
     t->attr=(ThreadAttr){.magic=ATTR_MAGIC,.policy=1,.prio=DEFAULT_PRIO,.stack=DEFAULT_STACK,.affinity=0x7f};
     return t;
@@ -129,7 +181,7 @@ int32_t *runtime_errno(void) { return &guest_errno; }
 
 static ABI int32_t attr_init(ThreadAttr **out) {
     if (!out) return ERR(22);
-    ThreadAttr *a=calloc(1,sizeof(*a));
+    ThreadAttr *a=guest_alloc(sizeof(*a));
     if (!a) return ERR(12);
     *a=(ThreadAttr){.magic=ATTR_MAGIC,.policy=1,.prio=DEFAULT_PRIO,.inherit=4,.stack=DEFAULT_STACK,.guard=4096,.affinity=0x7f};
     pthread_mutex_lock(&lock); a->next=attributes; attributes=a; pthread_mutex_unlock(&lock);
@@ -143,7 +195,7 @@ static ABI int32_t attr_destroy(ThreadAttr **slot) {
     while (*link!=a) link=&(*link)->next;
     *link=a->next; a->magic=0;
     pthread_mutex_unlock(&lock);
-    free(a); *slot=NULL; return 0;
+    guest_free(a); *slot=NULL; return 0;
 }
 static ABI int32_t attr_get(void *thread,ThreadAttr **out) {
     ThreadAttr *a=find_attr(out);
@@ -213,17 +265,49 @@ static ABI int32_t attr_set_guard(ThreadAttr **slot,uint64_t size) {
 
 /* Linux thread names hold 15 characters; longer ones would be rejected. */
 static void set_host_name(const char *name) {
+#ifdef _WIN32
+    typedef HRESULT (WINAPI *SetDescription)(HANDLE,PCWSTR);
+    SetDescription set_description=(SetDescription)(uintptr_t)GetProcAddress(GetModuleHandleW(L"kernel32.dll"),"SetThreadDescription");
+    WCHAR wide[32];
+    if (set_description && MultiByteToWideChar(CP_UTF8,0,name,-1,wide,32)) set_description(GetCurrentThread(),wide);
+#else
     char host[16]={0};
     memcpy(host,name,strnlen(name,sizeof(host)-1));
     pthread_setname_np(pthread_self(),host);
+#endif
 }
+#ifdef _WIN32
+/* SysV declaration makes GCC preserve Win64 nonvolatile registers at the call
+ * site. The implementation also serves the loader's main-thread stack switch. */
+static void ABI guest_thread_start(void *p, void *unused) {
+    (void)unused;
+    GuestThread *t=p;
+    t->result=t->entry(t->argument);
+}
+#endif
 static void *host_start(void *p) {
     GuestThread *t=p;
     attach(t);
     set_host_name(t->name);
+#ifdef _WIN32
+    size_t stack_bytes=(size_t)(t->attr.stack<MIN_STACK ? MIN_STACK : t->attr.stack)+STACK_MARGIN;
+    unsigned char *stack=runtime_low_map(stack_bytes,3);
+    if (!stack) { fputs("Cannot allocate low guest stack\n",stderr); exit(21); }
+    uintptr_t host_stack_base,host_stack_limit;
+    __asm__ volatile("movq %%gs:0x8,%0\n movq %%gs:0x10,%1" : "=r"(host_stack_base),"=r"(host_stack_limit));
+    if (!__builtin_setjmp(t->exit_jump))
+        enter_on_stack((void *)guest_thread_start,t,NULL,stack+stack_bytes-64,stack);
+    /* pthread_exit skips the assembly return through the GCC recovery point. */
+    __asm__ volatile("movq %0,%%gs:0x8\n movq %1,%%gs:0x10" : : "r"(host_stack_base),"r"(host_stack_limit) : "memory");
+    VirtualFree(stack,0,MEM_RELEASE);
+#else
     if (!setjmp(t->exit_jump)) t->result=t->entry(t->argument);
+#endif
     runtime_thread_keys_cleanup();
     pthread_mutex_lock(&lock); t->finished=1; ++exited; pthread_mutex_unlock(&lock);
+#ifdef _WIN32
+    set_guest_tcb(t->previous_tcb);
+#endif
     return t->result;
 }
 static int32_t create(GuestThread **out,ThreadAttr **attr_slot,GuestEntry entry,void *argument,const char *name) {
@@ -240,9 +324,13 @@ static int32_t create(GuestThread **out,ThreadAttr **attr_slot,GuestEntry entry,
     uint64_t stack=t->attr.stack<MIN_STACK ? MIN_STACK : t->attr.stack;
     /* Stacks below 1 TiB as on PS4; guest code may pack stack addresses. */
     size_t stack_bytes=(size_t)stack+STACK_MARGIN;
+#ifndef _WIN32
     void *stack_memory=runtime_low_map(stack_bytes,PROT_READ|PROT_WRITE);
     if (stack_memory) pthread_attr_setstack(&host,stack_memory,stack_bytes);
     else pthread_attr_setstacksize(&host,stack_bytes);
+#else
+    pthread_attr_setstacksize(&host,stack_bytes);
+#endif
     publish(t);
     /* Publish the handle before the thread can run and inspect itself. */
     *out=t;
@@ -281,7 +369,11 @@ static ABI __attribute__((noreturn)) void thread_exit(void *value) {
     if (t->host_owned) { fputs("STOP: pthread_exit on host-owned/main thread\n",stderr); exit(21); }
     t->result=value;
     /* No host unwinder: guest frames have no registered FDEs. */
+#ifdef _WIN32
+    __builtin_longjmp(t->exit_jump,1);
+#else
     longjmp(t->exit_jump,1);
+#endif
 }
 static ABI int32_t thread_yield(void) { sched_yield(); return 0; }
 static ABI int32_t thread_get_prio(GuestThread *t,int *prio) {
@@ -353,9 +445,3 @@ void runtime_thread_report(void) {
     printf("Runtime: guest threads created=%zu, exited=%zu, joined=%zu\n",created,exited,joined_count);
     pthread_mutex_unlock(&lock);
 }
-#else
-uintptr_t runtime_thread_resolve(const char *name) { (void)name; return 0; }
-void runtime_thread_report(void) {}
-void runtime_thread_attach_main(void) {}
-void runtime_set_main_tls(const void *d,uint64_t f,uint64_t m,uint64_t a) { (void)d;(void)f;(void)m;(void)a; }
-#endif

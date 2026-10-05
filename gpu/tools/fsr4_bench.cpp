@@ -1,3 +1,4 @@
+// Windows port modifications by yaonikaixin999999, 2026-10-05.
 // SPDX-License-Identifier: GPL-2.0-or-later
 // bbport: FSR 4 benchmark outside the game. Runs the v07 INT8 provider (the same assets and
 // provider as vk_fsr4.cpp) on synthetic inputs and prints GPU time per pass (BB_FSR4_PROFILE)
@@ -276,9 +277,17 @@ int main(int argc, char** argv) {
             break;
         }
     }
+#ifdef _WIN32
+    if (!std::getenv("BB_FSR4_PROFILE")) _putenv_s("BB_FSR4_PROFILE", "1");
+#else
     setenv("BB_FSR4_PROFILE", "1", 0);
+#endif
     if (stats) {
+#ifdef _WIN32
+        _putenv_s("BB_FSR4_STATS", "1");
+#else
         setenv("BB_FSR4_STATS", "1", 1);
+#endif
     }
     const Gpu gpu = CreateGpu(stats);
 

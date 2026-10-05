@@ -1,3 +1,4 @@
+// Windows port modifications by yaonikaixin999999, 2026-10-05.
 /* System services for an offline, single-user console:
  *   - one local user (id 1) who is logged in but not signed in to PSN;
  *   - network cable unplugged: NetCtl disconnected, sockets unavailable;
@@ -6,14 +7,19 @@
  * Every entry here is an explicit contract; unknown functions still stop. */
 #define _GNU_SOURCE
 #include "runtime.h"
+#include "windows_time.h"
 #include "gpu/bbgpu.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#ifndef _WIN32
 #include <pthread.h>
 #include <time.h>
+#ifdef _WIN32
+#include <winsock2.h>
+#include <ws2tcpip.h>
+#else
 #include <arpa/inet.h>
+#endif
 
 #define USER_ID 1
 #define ORBIS_OK 0
@@ -74,7 +80,14 @@ static ABI int32_t system_param(int32_t id,int32_t *value) {
     case 1: *value=language(); break;           /* language (1 = English US, 8 = Russian) */
     case 2: *value=1; break;                    /* date format DD/MM/YYYY */
     case 3: *value=1; break;                    /* 24-hour clock */
-    case 4: { time_t now=time(NULL); struct tm t; localtime_r(&now,&t); *value=(int32_t)(t.tm_gmtoff/60); break; }
+    case 4: { time_t now=time(NULL); struct tm t; localtime_r(&now,&t);
+#ifdef _WIN32
+        struct tm u; gmtime_r(&now,&u); u.tm_isdst=t.tm_isdst;
+        *value=(int32_t)(difftime(now,mktime(&u))/60);
+#else
+        *value=(int32_t)(t.tm_gmtoff/60);
+#endif
+        break; }
     case 5: *value=0; break;                    /* summer time */
     case 7: *value=0; break;                    /* parental level off */
     case 1000: *value=1; break;                 /* enter button = cross */
@@ -196,7 +209,7 @@ static int32_t dialog_term(int i) {
     static ABI int32_t tag##_term(void) { return dialog_term(i); }
 DIALOG(msg,1) DIALOG(save,2) DIALOG(profile,3) DIALOG(commerce,4)
 static ABI int32_t profile_result(void *result) { if (result) memset(result,0,4); return 0; }
-/* ImeDialog: text typed on the keyboard into the game window (title bar shows it).
+/* ImeDialog: visible host dialog with a controller keyboard and SDL text input.
  * OrbisImeDialogParam: user, type, languages(8), enter label, method, filter,
  * option, max length, char16 buffer, position, alignment, placeholder, title. */
 typedef struct {
@@ -246,10 +259,10 @@ static ABI int32_t ime_init(const ImeParam *param, const void *extended) {
     utf16_to_utf8(param->title,128,prompt,sizeof(prompt));
     const char *preset=getenv("BB_IME_TEXT");
     if (preset) { ime_complete(0,preset); return 0; }
-    if (!bbgpu_text_input_begin(initial,prompt[0] ? prompt : "Text")) {
+    if (!bbgpu_text_input_begin(initial,prompt[0] ? prompt : "Text",param->max_length)) {
         const char *name=getenv("BB_USER_NAME");
         ime_complete(0,name ? name : initial[0] ? initial : "Hunter");
-    } else printf("Runtime: ImeDialog opened: type in the game window, Enter to confirm, Esc to cancel\n");
+    } else printf("Runtime: ImeDialog opened: controller A selects, B cancels, X deletes, Y/Start confirms; keyboard Enter/Esc supported\n");
     return 0;
 }
 static ABI int32_t ime_status(void) {
@@ -265,7 +278,12 @@ static ABI int32_t ime_result(uint32_t *result) {
     if (result) *result=(uint32_t)ime.end_status;
     return 0;
 }
-static ABI int32_t ime_term(void) { memset(&ime,0,sizeof(ime)); return 0; }
+static ABI int32_t ime_term(void) { bbgpu_text_input_end(); memset(&ime,0,sizeof(ime)); return 0; }
+static ABI int32_t ime_abort(void) {
+    bbgpu_text_input_end();
+    if (ime.running) ime_complete(1,"");
+    return 0;
+}
 
 /* ---- Trophies: accepted locally, recorded in the log ---- */
 static ABI int32_t trophy_context(int32_t *ctx,int32_t user,uint32_t label,uint64_t options) {
@@ -456,7 +474,7 @@ static const RuntimeExport exports[]={
     {"sceNpCommerceDialogInitialize",commerce_init}, {"sceNpCommerceDialogOpen",commerce_open},
     {"sceNpCommerceDialogUpdateStatus",commerce_status}, {"sceNpCommerceDialogTerminate",commerce_term},
     {"sceImeDialogInit",ime_init}, {"sceImeDialogGetStatus",ime_status}, {"sceImeDialogGetResult",ime_result},
-    {"sceImeDialogTerm",ime_term}, {"sceImeDialogAbort",ime_term},
+    {"sceImeDialogTerm",ime_term}, {"sceImeDialogAbort",ime_abort},
     {"sceNpTrophyCreateContext",trophy_context}, {"sceNpTrophyCreateHandle",trophy_handle},
     {"sceNpTrophyRegisterContext",trophy_register}, {"sceNpTrophyUnlockTrophy",trophy_unlock},
     {"sceNpTrophyGetGameInfo",trophy_game_info}, {"sceNpTrophyGetTrophyInfo",trophy_info},
@@ -468,6 +486,3 @@ static const RuntimeExport exports[]={
     {"sceVoiceInit",ok_void}, {"sceVoiceEnd",ok_void},
 };
 uintptr_t runtime_services_resolve(const char *name) { return RUNTIME_LOOKUP(exports,name); }
-#else
-uintptr_t runtime_services_resolve(const char *name) { (void)name; return 0; }
-#endif

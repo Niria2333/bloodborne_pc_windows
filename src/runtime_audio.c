@@ -1,3 +1,4 @@
+// Windows port modifications by yaonikaixin999999, 2026-10-05.
 /* libSceAudioOut on SDL3 audio streams. sceAudioOutOutput returns once per
  * buffer period on a steady clock, like PS4 hardware: FMOD's output thread
  * reads 256-frame slots out of its mixer's 512-frame ring, and returning in
@@ -13,6 +14,7 @@
 #include <string.h>
 #include <pthread.h>
 #include <time.h>
+#include <errno.h>
 #include <SDL3/SDL.h>
 
 #define PORTS 25
@@ -52,8 +54,17 @@ static size_t buffers_out, ports_opened;
 
 static uint64_t now_ns(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC,&t); return (uint64_t)t.tv_sec*1000000000u+(uint64_t)t.tv_nsec; }
 static void sleep_until(uint64_t deadline) {
+#ifdef _WIN32
+    /* winpthreads rejects CLOCK_MONOTONIC + TIMER_ABSTIME with EINVAL.
+     * Use SDL's precise relative wait against the same monotonic deadline;
+     * winpthreads nanosleep also rounds a 5.33 ms audio period to ~15.6 ms. */
+    uint64_t now=now_ns();
+    if (now>=deadline) return;
+    SDL_DelayPrecise(deadline-now);
+#else
     struct timespec t={(time_t)(deadline/1000000000u),(long)(deadline%1000000000u)};
-    while (clock_nanosleep(CLOCK_MONOTONIC,TIMER_ABSTIME,&t,NULL)) {}
+    while (clock_nanosleep(CLOCK_MONOTONIC,TIMER_ABSTIME,&t,NULL)==EINTR) {}
+#endif
 }
 static int sdl_audio(void) {
     if (sdl_ready<0) {

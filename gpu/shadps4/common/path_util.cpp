@@ -1,3 +1,4 @@
+// Windows port modifications by yaonikaixin999999, 2026-10-05.
 // SPDX-FileCopyrightText: Copyright 2024 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
@@ -7,6 +8,10 @@
 #include "common/path_util.h"
 #include "common/scope_exit.h"
 #include "common/types.h"
+#ifdef _WIN32
+#include <Shlobj.h>
+#include <windows.h>
+#endif
 
 #ifdef __APPLE__
 #include <CoreFoundation/CFBundle.h>
@@ -18,8 +23,6 @@
 #ifdef _WIN32
 // This is the maximum number of UTF-16 code units permissible in Windows file paths
 #define MAX_PATH 260
-#include <Shlobj.h>
-#include <windows.h>
 #else
 // This is the maximum number of UTF-8 code units permissible in all other OSes' file paths
 #define MAX_PATH 1024

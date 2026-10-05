@@ -1,9 +1,9 @@
+// Windows port modifications by yaonikaixin999999, 2026-10-05.
 #include "bbport_write_log.h"
 // bbport: glue between the C loader and the vendored shadPS4 video core.
 #include "bbport_overlay.h"
 #include "bbport_settings.h"
 #include "bbport_copy.h"
-#include <sys/resource.h>
 #include "bbport_toggles.h"
 #include <algorithm>
 #include <atomic>
@@ -22,6 +22,9 @@
 #include "common/elf_info.h"
 #include "common/logging/log.h"
 #include "common/rdtsc.h"
+#ifdef _WIN32
+#include "common/ntapi.h"
+#endif
 #include "core/libraries/kernel/orbis_error.h"
 #include "core/libraries/libs.h"
 #include "core/memory.h"
@@ -206,18 +209,44 @@ static void StartProfileWriter() {
 #endif
 
 extern "C" int bbgpu_init(const BbGpuConfig* config) {
+#ifdef _WIN32
+    Common::NtApi::Initialize();
+#endif
     BbSettings::Load();
 #ifdef BB_PGO_GENERATE
     StartProfileWriter();
 #endif
     g_sdk_version = config->sdk_version;
-    if (config->user_dir) setenv("BB_GPU_USER_DIR", config->user_dir, 0);
+    if (config->user_dir) {
+#ifdef _WIN32
+        if (!std::getenv("BB_GPU_USER_DIR")) _putenv_s("BB_GPU_USER_DIR", config->user_dir);
+#else
+        setenv("BB_GPU_USER_DIR", config->user_dir, 0);
+#endif
+    }
     Core::Emulator::FillElfInfo(*config);
     const std::string title = config->title ? config->title : "Bloodborne";
-    const s32 width = config->width, height = config->height;
+    s32 width = config->width, height = config->height;
+#ifdef _WIN32
+    // Match the Win32 swapchain to the output selected by the launcher.
+    // The scene may render smaller and be upscaled, while the UI remains native.
+    if (const char* output = std::getenv("BB_OUTPUT_RES")) {
+        int w = 0, h = 0;
+        char extra = 0;
+        if (std::sscanf(output, "%dx%d%c", &w, &h, &extra) == 2 &&
+            w >= 320 && h >= 240 && w <= 7680 && h <= 4320) {
+            width = w;
+            height = h;
+        }
+    }
+    std::printf("Windows presenter: requested %dx%d output pixels\n", width, height);
+#endif
     g_window_thread = std::thread([title, width, height] {
         Common::SetCurrentThreadName("bb:window");
         auto* window = new Frontend::WindowSDL(width, height, title.c_str());
+#ifdef _WIN32
+        std::printf("Windows presenter: actual %dx%d window pixels\n", window->GetWidth(), window->GetHeight());
+#endif
         {
             std::scoped_lock lock{g_window_mutex};
             g_window = window;
@@ -325,20 +354,23 @@ extern "C" int bbgpu_overlay_captures_input(void) {
     return BbOverlay::CapturesInput() ? 1 : 0;
 }
 
-extern "C" int bbgpu_text_input_begin(const char* initial, const char* prompt) {
+extern "C" int bbgpu_text_input_begin(const char* initial, const char* prompt, uint32_t max_length) {
     if (!g_window) return 0;
-    g_window->BeginTextInput(initial ? initial : "", prompt ? prompt : "Text");
-    return 1;
+    return BbOverlay::BeginTextInput(initial ? initial : "", prompt ? prompt : "Text", max_length) ? 1 : 0;
 }
 
 extern "C" int bbgpu_text_input_poll(char* out, uint64_t size) {
     if (!g_window) return 2;
     std::string text;
-    const int state = g_window->PollTextInput(text);
+    const int state = BbOverlay::PollTextInput(text);
     if (size) {
         const size_t n = std::min<size_t>(text.size(), size - 1);
         std::memcpy(out, text.data(), n);
         out[n] = 0;
     }
     return state;
+}
+
+extern "C" void bbgpu_text_input_end(void) {
+    BbOverlay::EndTextInput();
 }

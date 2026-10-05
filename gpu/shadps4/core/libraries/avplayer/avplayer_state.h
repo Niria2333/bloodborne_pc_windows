@@ -1,3 +1,4 @@
+// Windows port modifications by yaonikaixin999999, 2026-10-05.
 // SPDX-FileCopyrightText: Copyright 2024 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
@@ -60,7 +61,7 @@ private:
     void EmitEvent(AvPlayerEvents event_id, void* event_data = nullptr);
     bool SetState(AvState state);
 
-    void AvControllerThread(std::stop_token stop);
+    void AvControllerThread(std::stop_token stop, std::shared_ptr<std::atomic_bool> alive);
 
     void AddSourceEvent();
     void WarningEvent(s32 id);
@@ -78,7 +79,10 @@ private:
     AvPlayerEventReplacement m_event_replacement{};
     bool m_auto_start{};
     char m_default_language[4]{};
-    AvPlayerAvSyncMode m_sync_mode = AvPlayerAvSyncMode::Default;
+    std::atomic<AvPlayerAvSyncMode> m_sync_mode{AvPlayerAvSyncMode::Default};
+    // A game callback may close the player on its controller thread. The loop must
+    // observe this token before touching the object again after that callback.
+    std::shared_ptr<std::atomic_bool> m_alive = std::make_shared<std::atomic_bool>(true);
 
     std::atomic<AvState> m_current_state;
     std::atomic<AvState> m_previous_state;

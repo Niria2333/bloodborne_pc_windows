@@ -1,8 +1,10 @@
+// Windows port modifications by yaonikaixin999999, 2026-10-05.
 /* libSceRtc: calendar time. A tick is one microsecond since 0001-01-01 00:00
  * (proleptic Gregorian), the PS4 convention; the host clock supplies "now"
  * and the host time zone supplies local time. */
 #define _GNU_SOURCE
 #include "runtime.h"
+#include "windows_time.h"
 #include <stdio.h>
 #include <string.h>
 #include <time.h>
@@ -71,7 +73,14 @@ static int64_t local_offset(uint64_t utc) {
     time_t seconds=(time_t)((int64_t)(utc-UNIX_EPOCH_TICKS)/1000000);
     struct tm local;
     localtime_r(&seconds,&local);
+#ifdef _WIN32
+    struct tm universal;
+    gmtime_r(&seconds,&universal);
+    universal.tm_isdst=local.tm_isdst;
+    return (int64_t)difftime(seconds,mktime(&universal))*1000000;
+#else
     return (int64_t)local.tm_gmtoff*1000000;
+#endif
 }
 
 static ABI int32_t rtc_current_local(DateTime *t) {

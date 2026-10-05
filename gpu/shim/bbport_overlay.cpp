@@ -1,5 +1,7 @@
+// Windows port modifications by yaonikaixin999999, 2026-10-05.
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include "bbport_overlay.h"
+#include "bbport_text_dialog.h"
 
 #include <atomic>
 #include <chrono>
@@ -16,6 +18,16 @@
 #include "video_core/renderer_vulkan/vk_scheduler.h"
 
 // DejaVu Sans (Cyrillic), embedded (third_party/fonts, Bitstream Vera license).
+#ifdef _WIN32
+asm(".section .rdata,\"dr\"\n"
+    ".balign 16\n"
+    ".global bb_font_ttf\n"
+    "bb_font_ttf:\n"
+    ".incbin \"" BB_FONT_PATH "\"\n"
+    ".global bb_font_ttf_end\n"
+    "bb_font_ttf_end:\n"
+    ".text\n");
+#else
 asm(".section .rodata\n"
     ".balign 16\n"
     ".hidden bb_font_ttf\n"
@@ -26,6 +38,7 @@ asm(".section .rodata\n"
     ".global bb_font_ttf_end\n"
     "bb_font_ttf_end:\n"
     ".previous\n");
+#endif
 extern "C" const unsigned char bb_font_ttf[];
 extern "C" const unsigned char bb_font_ttf_end[];
 
@@ -38,6 +51,11 @@ namespace {
 std::mutex imgui_mutex; // the ImGui context: window thread (input) and present thread
 bool initialized = false;
 std::atomic<bool> menu_open{false};
+TextDialog text_dialog;
+std::atomic<bool> text_captures{false};
+unsigned text_key_guard = 0;
+int text_stick_x = 0, text_stick_y = 0;
+std::string text_composition;
 bool l3_down = false, r3_down = false;
 bool dirty = false; // settings changed while open: saved on close
 float base_scale = 1.0f;
@@ -45,6 +63,58 @@ float base_scale = 1.0f;
 // Present rate for the FPS counter.
 std::chrono::steady_clock::time_point last_present{};
 float frame_ms_avg = 0.0f;
+
+void UpdateTextCapture() {
+    text_captures = text_dialog.CapturesInput() || text_key_guard;
+}
+
+void TextEntry() {
+    const auto* viewport = ImGui::GetMainViewport();
+    ImGui::GetBackgroundDrawList()->AddRectFilled(viewport->Pos,
+        ImVec2(viewport->Pos.x + viewport->Size.x, viewport->Pos.y + viewport->Size.y),
+        IM_COL32(0, 0, 0, 160));
+    ImGui::SetNextWindowPos(ImVec2(viewport->Size.x * 0.5f, viewport->Size.y * 0.5f),
+                           ImGuiCond_Always, ImVec2(0.5f, 0.5f));
+    ImGui::SetNextWindowSize(ImVec2(700.0f * base_scale, 0));
+    ImGui::Begin("角色名字 / Character name", nullptr,
+        ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_AlwaysAutoResize);
+    ImGui::TextUnformatted(text_dialog.prompt.c_str());
+    ImGui::Separator();
+    ImGui::TextWrapped("%s_", text_dialog.text.c_str());
+    if (!text_composition.empty()) ImGui::TextDisabled("%s", text_composition.c_str());
+    ImGui::TextDisabled("%u / %u", TextDialog::Units(text_dialog.text), text_dialog.max_length);
+    ImGui::TextUnformatted("方向键 / 左摇杆移动   A 选择   B 取消   X 删除   Y / Menu 完成");
+    ImGui::TextUnformatted("也可用键盘或鼠标；中文名字可用系统输入法。Enter 完成 / Esc 取消");
+    ImGui::Separator();
+    for (int row = 0; row < 4; ++row) {
+        for (int col = 0; col < TextDialog::Columns; ++col) {
+            const int index = row * TextDialog::Columns + col;
+            char label[24];
+            char c = TextDialog::Keys[index];
+            if (text_dialog.uppercase && c >= 'a' && c <= 'z') c -= 'a' - 'A';
+            std::snprintf(label, sizeof(label), "%c##key%d", c, index);
+            if (col) ImGui::SameLine();
+            const bool selected = index == text_dialog.selected;
+            if (selected) ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.2f, 0.5f, 0.8f, 1));
+            if (ImGui::Button(label, ImVec2(58.0f * base_scale, 38.0f * base_scale))) {
+                text_dialog.Activate(index);
+            }
+            if (selected) ImGui::PopStyleColor();
+        }
+    }
+    const char* actions[] = {"大小写", "删除", "空格", "完成", "取消"};
+    for (int i = 0; i < 5; ++i) {
+        if (i) ImGui::SameLine();
+        const bool selected = text_dialog.selected == TextDialog::CharacterCount + i;
+        if (selected) ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.2f, 0.5f, 0.8f, 1));
+        if (ImGui::Button(actions[i], ImVec2(122.0f * base_scale, 38.0f * base_scale))) {
+            text_dialog.Activate(TextDialog::CharacterCount + i);
+        }
+        if (selected) ImGui::PopStyleColor();
+    }
+    ImGui::End();
+    UpdateTextCapture();
+}
 
 void SetOpen(bool value) {
     if (menu_open.exchange(value) == value) {
@@ -426,6 +496,18 @@ void Init(const Vulkan::Instance& instance, vk::Format format, u32 image_count) 
     font_config.FontDataOwnedByAtlas = false;
     io.Fonts->AddFontFromMemoryTTF(const_cast<unsigned char*>(bb_font_ttf),
                                    int(bb_font_ttf_end - bb_font_ttf), 18.0f, &font_config);
+#ifdef _WIN32
+    // Use the installed Windows font for Chinese names and instructions.
+    const char* windir = std::getenv("WINDIR");
+    const std::string chinese_font = std::string(windir ? windir : "C:/Windows") + "/Fonts/msyh.ttc";
+    if (FILE* font = std::fopen(chinese_font.c_str(), "rb")) {
+        std::fclose(font);
+        ImFontConfig merge;
+        merge.MergeMode = true;
+        io.Fonts->AddFontFromFileTTF(chinese_font.c_str(), 18.0f, &merge,
+                                   io.Fonts->GetGlyphRangesChineseFull());
+    }
+#endif
 
     const vk::Instance vk_instance = instance.GetInstance();
     ImGui_ImplVulkan_LoadFunctions(
@@ -466,7 +548,13 @@ void UpdateTextInput(SDL_Window* window) {
     bool want = false;
     {
         std::scoped_lock lock{imgui_mutex};
-        want = initialized && menu_open && ImGui::GetIO().WantTextInput;
+        want = initialized && (text_dialog.active || (menu_open && ImGui::GetIO().WantTextInput));
+        if (text_dialog.active) {
+            int w = 0, h = 0;
+            SDL_GetWindowSize(window, &w, &h);
+            SDL_Rect area{std::max(0, w / 2 - 300), std::max(0, h / 2 - 120), 600, 40};
+            SDL_SetTextInputArea(window, &area, 0);
+        }
     }
     if (want != SDL_TextInputActive(window)) {
         if (want) {
@@ -483,7 +571,71 @@ bool HandleEvent(const SDL_Event& event) {
         return false;
     }
     ImGuiIO& io = ImGui::GetIO();
-    const bool is_open = menu_open;
+    const bool was_text = text_captures;
+    if (event.type == SDL_EVENT_GAMEPAD_REMOVED || event.type == SDL_EVENT_WINDOW_FOCUS_LOST) {
+        text_dialog.ReleaseButtons();
+        text_key_guard = 0;
+        text_composition.clear();
+        UpdateTextCapture();
+    }
+    if (event.type == SDL_EVENT_GAMEPAD_BUTTON_DOWN || event.type == SDL_EVENT_GAMEPAD_BUTTON_UP) {
+        using B = TextDialog::Button;
+        B button = B::Count;
+        switch (event.gbutton.button) {
+            case SDL_GAMEPAD_BUTTON_SOUTH: button = B::Select; break;
+            case SDL_GAMEPAD_BUTTON_EAST: button = B::Cancel; break;
+            case SDL_GAMEPAD_BUTTON_WEST: button = B::Delete; break;
+            case SDL_GAMEPAD_BUTTON_NORTH:
+            case SDL_GAMEPAD_BUTTON_START: button = B::Confirm; break;
+            case SDL_GAMEPAD_BUTTON_DPAD_UP: button = B::Up; break;
+            case SDL_GAMEPAD_BUTTON_DPAD_DOWN: button = B::Down; break;
+            case SDL_GAMEPAD_BUTTON_DPAD_LEFT: button = B::Left; break;
+            case SDL_GAMEPAD_BUTTON_DPAD_RIGHT: button = B::Right; break;
+        }
+        if (button != B::Count) text_dialog.Pad(button, event.type == SDL_EVENT_GAMEPAD_BUTTON_DOWN);
+        UpdateTextCapture();
+        if (was_text) return true;
+    }
+    if (event.type == SDL_EVENT_KEY_UP) {
+        if (event.key.key == SDLK_RETURN || event.key.key == SDLK_KP_ENTER) text_key_guard &= ~1u;
+        if (event.key.key == SDLK_ESCAPE) text_key_guard &= ~2u;
+        UpdateTextCapture();
+        if (was_text) return true;
+    }
+    if (text_dialog.active) {
+        if (event.type == SDL_EVENT_TEXT_INPUT) {
+            text_dialog.Append(event.text.text); text_composition.clear(); return true;
+        }
+        if (event.type == SDL_EVENT_TEXT_EDITING) {
+            text_composition = event.edit.text ? event.edit.text : ""; return true;
+        }
+        if (event.type == SDL_EVENT_KEY_DOWN) {
+            if (!text_composition.empty()) return true; // Enter commits an IME candidate first
+            switch (event.key.key) {
+                case SDLK_BACKSPACE: text_dialog.Delete(); break;
+                case SDLK_RETURN:
+                case SDLK_KP_ENTER: text_key_guard |= 1; text_dialog.Finish(true); break;
+                case SDLK_ESCAPE: text_key_guard |= 2; text_dialog.Finish(false); break;
+                case SDLK_UP: text_dialog.Move(0, -1); break;
+                case SDLK_DOWN: text_dialog.Move(0, 1); break;
+                case SDLK_LEFT: text_dialog.Move(-1, 0); break;
+                case SDLK_RIGHT: text_dialog.Move(1, 0); break;
+            }
+            UpdateTextCapture(); return true;
+        }
+        if (event.type == SDL_EVENT_GAMEPAD_AXIS_MOTION) {
+            const int direction = event.gaxis.value < -16000 ? -1 : event.gaxis.value > 16000 ? 1 : 0;
+            if (event.gaxis.axis == SDL_GAMEPAD_AXIS_LEFTX) {
+                if (direction && direction != text_stick_x) text_dialog.Move(direction, 0);
+                text_stick_x = direction;
+            } else if (event.gaxis.axis == SDL_GAMEPAD_AXIS_LEFTY) {
+                if (direction && direction != text_stick_y) text_dialog.Move(0, direction);
+                text_stick_y = direction;
+            }
+            return true;
+        }
+    }
+    const bool is_open = menu_open || text_dialog.active;
     switch (event.type) {
     case SDL_EVENT_KEY_DOWN:
     case SDL_EVENT_KEY_UP: {
@@ -568,11 +720,34 @@ bool HandleEvent(const SDL_Event& event) {
 }
 
 bool Visible() {
-    return initialized && (menu_open || BbSettings::Get().show_fps);
+    return initialized && (menu_open || text_captures || BbSettings::Get().show_fps);
 }
 
 bool CapturesInput() {
-    return menu_open;
+    return menu_open || text_captures;
+}
+
+bool BeginTextInput(const std::string& initial, const std::string& prompt, u32 max_length) {
+    std::scoped_lock lock{imgui_mutex};
+    if (!initialized) return false;
+    text_dialog.Begin(initial, prompt, max_length);
+    text_composition.clear();
+    text_stick_x = text_stick_y = 0;
+    UpdateTextCapture();
+    return true;
+}
+
+int PollTextInput(std::string& text) {
+    std::scoped_lock lock{imgui_mutex};
+    text = text_dialog.text;
+    return text_dialog.state;
+}
+
+void EndTextInput() {
+    std::scoped_lock lock{imgui_mutex};
+    text_dialog.End();
+    text_composition.clear();
+    UpdateTextCapture();
 }
 
 void Render(vk::CommandBuffer cmdbuf, vk::ImageView view, vk::Extent2D extent) {
@@ -601,7 +776,10 @@ void Render(vk::CommandBuffer cmdbuf, vk::ImageView view, vk::Extent2D extent) {
 
     ImGui_ImplVulkan_NewFrame();
     ImGui::NewFrame();
-    if (menu_open) {
+    io.MouseDrawCursor = menu_open || text_dialog.active;
+    if (text_dialog.active) {
+        TextEntry();
+    } else if (menu_open) {
         Menu();
     }
     if (BbSettings::Get().show_fps && !menu_open) {

@@ -1,3 +1,4 @@
+// Windows port modifications by yaonikaixin999999, 2026-10-05.
 /* Minimal x86-64 native loader experiment. Not a PS4 emulator or game port. */
 #define _GNU_SOURCE
 #include <stdint.h>
@@ -12,6 +13,7 @@
 #endif
 #ifdef _WIN32
 #include <windows.h>
+#include <process.h>
 #else
 #include <sys/mman.h>
 #include <malloc.h>
@@ -30,6 +32,7 @@ typedef struct { uint64_t target, kind, value, addend; } Reloc;
 static char (*names)[128];
 static uint64_t import_count;
 static unsigned char *image;
+static uint64_t image_size;
 static size_t page_size;
 typedef struct { uint64_t base, size, init, tls_address, tls_memsz, tls_filesz, tls_module; } LinkedModule;
 static LinkedModule modules[16];
@@ -38,7 +41,7 @@ static int entered_game;
 static int gpu_enabled;
 int vulkan_smoke(void);
 
-static void fail(const char *message) { fprintf(stderr, "ERROR: %s\n", message); exit(1); }
+static __attribute__((noreturn)) void fail(const char *message) { fprintf(stderr, "ERROR: %s\n", message); exit(1); }
 static uint64_t read64(FILE *f) {
     unsigned char b[8];
     if (fread(b, 1, 8, f) != 8) fail("truncated boot file");
@@ -48,10 +51,12 @@ static uint64_t read64(FILE *f) {
 }
 static size_t round_page(size_t size) { return (size + page_size - 1) & ~(page_size - 1); }
 static void *allocate(size_t size) {
-#ifndef _WIN32
+#ifdef _WIN32
+    void *low=runtime_low_map(size,3);
+#else
     void *low=runtime_low_map(size,PROT_READ|PROT_WRITE);
-    if (low) return low;
 #endif
+    if (low) return low;
 #ifdef _WIN32
     void *p = VirtualAlloc(NULL, size, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
     if (!p) fail("VirtualAlloc failed");
@@ -90,14 +95,7 @@ static ABI __attribute__((noreturn)) void unresolved(uint32_t id, uintptr_t argu
     fflush(NULL);
     _exit(20); /* no destructors: GPU, audio and guest threads are still running */
 }
-#ifndef _WIN32
-/* enter_on_stack(entry, arg0, arg1, stack_top): call entry(arg0,arg1) on a new stack. */
-void enter_on_stack(void *entry, void *arg0, void *arg1, void *top);
-__asm__(".text\n.globl enter_on_stack\nenter_on_stack:\n"
-        " push %rbp\n mov %rsp,%rbp\n and $-16,%rcx\n mov %rcx,%rsp\n"
-        " mov %rdi,%rax\n mov %rsi,%rdi\n mov %rdx,%rsi\n call *%rax\n"
-        " mov %rbp,%rsp\n pop %rbp\n ret\n");
-#endif
+#include "native_stack.h"
 static ABI void guest_exit(void) { puts("Runtime: process finalizer callback reached"); }
 #ifndef _WIN32
 static void fault(int sig, siginfo_t *info, void *context) {
@@ -144,6 +142,7 @@ static void fault(int sig, siginfo_t *info, void *context) {
 #endif
 /* Watchdog: dump RIP and the rbp frame chain of every thread (guest offsets
  * when inside the image). Reads use process_vm_readv so bad frames cannot fault. */
+#ifndef _WIN32
 static uintptr_t exe_base;
 static void write_hex(char *out, uint64_t v) {
     const char digits[] = "0123456789abcdef";
@@ -187,6 +186,42 @@ static void watchdog(int sig, siginfo_t *info, void *context) {
     usleep(100000);
     _exit(128 + sig);
 }
+#else
+static LONG CALLBACK windows_fault(EXCEPTION_POINTERS *fault_info) {
+    DWORD code=fault_info->ExceptionRecord->ExceptionCode;
+    if (code!=EXCEPTION_ACCESS_VIOLATION && code!=EXCEPTION_ILLEGAL_INSTRUCTION &&
+        code!=EXCEPTION_IN_PAGE_ERROR && code!=EXCEPTION_STACK_OVERFLOW)
+        return EXCEPTION_CONTINUE_SEARCH;
+    void *address=fault_info->ExceptionRecord->NumberParameters>=2
+        ? (void *)(uintptr_t)fault_info->ExceptionRecord->ExceptionInformation[1] : NULL;
+    if (gpu_enabled && code==EXCEPTION_ACCESS_VIOLATION &&
+        bbgpu_handle_fault(fault_info,address)) return EXCEPTION_CONTINUE_EXECUTION;
+    if ((code==EXCEPTION_ACCESS_VIOLATION || code==EXCEPTION_IN_PAGE_ERROR) && runtime_fault_recover) {
+        jmp_buf *recover=runtime_fault_recover;
+        runtime_fault_recover=NULL;
+        /* Windows speculative readers use _setjmp(buf,NULL), so longjmp
+         * restores registers without unwinding generated guest/JIT frames. */
+        longjmp(*recover,1);
+    }
+    uintptr_t rip=(uintptr_t)fault_info->ContextRecord->Rip;
+    if (image && rip-(uintptr_t)image<image_size)
+        fprintf(stderr,"Guest fault (exception 0x%08lx) at guest offset 0x%" PRIxPTR ", address %p\n",
+                (unsigned long)code,rip-(uintptr_t)image,address);
+    else
+        fprintf(stderr,"Host fault (exception 0x%08lx) at RIP %p, address %p\n",
+                (unsigned long)code,(void *)rip,address);
+    if (gpu_enabled) bbgpu_dump_guest_writes(fault_info);
+    fflush(NULL);
+    _exit(code==EXCEPTION_ILLEGAL_INSTRUCTION ? 132 : 139);
+}
+static DWORD WINAPI windows_watchdog(void *seconds) {
+    Sleep((DWORD)(uintptr_t)seconds*1000);
+    fputs("STOP: watchdog timeout\n",stderr);
+    fflush(NULL);
+    _exit(142);
+    return 0;
+}
+#endif
 /* param.sfo lookup: string or integer value of key, 0 when absent. */
 static int sfo_value(const char *path, const char *key, char *text, size_t text_size, uint32_t *number) {
     FILE *f=fopen(path,"rb");
@@ -257,8 +292,12 @@ static void apply_patches(const char *path, Segment *segments, uint64_t ns, cons
  * released before the new process opens its own. */
 void runtime_restart(void) {
     fflush(NULL);
+#ifdef _WIN32
+    puts("Runtime: requesting Windows launcher restart");
+    fflush(NULL);
+    _exit(75);
+#else
     puts("Runtime: restarting through run.sh");
-#ifndef _WIN32
     syscall(SYS_close_range, 3u, ~0u, 0u);
     execlp("bash", "bash", "run.sh", (char *)NULL);
     perror("runtime_restart: exec");
@@ -315,6 +354,12 @@ int main(int argc, char **argv) {
     bbgpu_register_kernel();
 #ifdef _WIN32
     SYSTEM_INFO system_info; GetSystemInfo(&system_info); page_size = system_info.dwPageSize;
+    if (!AddVectoredExceptionHandler(1,windows_fault)) fail("cannot install Windows exception handler");
+    if (timeout_seconds) {
+        HANDLE timer=CreateThread(NULL,0,windows_watchdog,(void *)(uintptr_t)timeout_seconds,0,NULL);
+        if (!timer) fail("cannot start watchdog");
+        CloseHandle(timer);
+    }
 #else
     page_size = (size_t)sysconf(_SC_PAGESIZE);
     struct sigaction sa = {0}; sa.sa_sigaction = fault; sa.sa_flags = SA_SIGINFO;
@@ -339,6 +384,7 @@ int main(int argc, char **argv) {
     runtime_start(strict_imports ? 0 : capabilities);
     if (!size || size > 512*1024*1024 || entry >= size || !ns || ns > 64 || nr > 1000000 || import_count > 100000)
         fail("boot file limits exceeded");
+    image_size=size;
     int multi=!memcmp(magic,"BBPROBE5",8);
     int linked=!memcmp(magic,"BBPROBE3",8) || !memcmp(magic,"BBPROBE4",8) || multi;
     int native_libc=linked && !strict_imports && (capabilities&1);
@@ -506,15 +552,14 @@ int main(int argc, char **argv) {
     printf("Entering original x86-64 code at guest offset 0x%" PRIx64 "\n", entry);
     entered_game=1;
     struct { uint64_t argc; const char *argv[2]; } params = {1, {"/app0/eboot.bin", NULL}};
-#ifdef _WIN32
-    typedef void (ABI *Entry)(void *, void (ABI *)(void));
-    ((Entry)(image + entry))(&params, guest_exit);
-#else
     /* The guest main thread runs on a stack below 1 TiB like PS4 stacks. */
     enum { MAIN_STACK=8*1024*1024 };
+#ifdef _WIN32
+    unsigned char *stack=runtime_low_map(MAIN_STACK,3);
+#else
     unsigned char *stack=runtime_low_map(MAIN_STACK,PROT_READ|PROT_WRITE);
-    if (!stack) fail("cannot allocate guest main stack");
-    enter_on_stack(image+entry,&params,(void *)guest_exit,stack+MAIN_STACK-64);
 #endif
+    if (!stack) fail("cannot allocate guest main stack");
+    enter_on_stack(image+entry,&params,(void *)guest_exit,stack+MAIN_STACK-64,stack);
     fail("entry unexpectedly returned");
 }

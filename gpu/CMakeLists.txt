@@ -1,3 +1,4 @@
+# Windows port modifications by yaonikaixin999999, 2026-10-05.
 # bbport GPU library: shadPS4 video core + shader recompiler + Gnm/VideoOut
 # drivers, adapted to the native_probe runtime through shims in shim/.
 cmake_minimum_required(VERSION 3.24)
@@ -43,14 +44,67 @@ endif()
 find_package(Vulkan REQUIRED)
 find_package(fmt REQUIRED)
 find_package(Boost REQUIRED)
-find_package(magic_enum REQUIRED)
+if (WIN32)
+    # MSYS2 does not package these upstream dependencies. Fetch fixed
+    # releases with content hashes, using an installed package when available.
+    include(FetchContent)
+    find_package(magic_enum CONFIG QUIET)
+    if (NOT magic_enum_FOUND)
+        FetchContent_Declare(magic_enum
+            URL https://codeload.github.com/Neargye/magic_enum/tar.gz/refs/tags/v0.9.7
+            URL_HASH SHA256=b403d3dad4ef542fdc3024fa37d3a6cedb4ad33c72e31b6d9bab89dcaf69edf7
+            DOWNLOAD_EXTRACT_TIMESTAMP TRUE)
+        FetchContent_MakeAvailable(magic_enum)
+    endif()
+else()
+    find_package(magic_enum REQUIRED)
+endif()
+find_path(BB_XBYAK_INCLUDE_DIR xbyak/xbyak.h)
+if (WIN32 AND NOT BB_XBYAK_INCLUDE_DIR)
+    FetchContent_Declare(xbyak
+        URL https://codeload.github.com/herumi/xbyak/tar.gz/refs/tags/v7.23
+        URL_HASH SHA256=7477958a0fd4fcee7d8691ba0a2e0584b76bcfed2e12157e3985d8eff280fe22
+        DOWNLOAD_EXTRACT_TIMESTAMP TRUE)
+    FetchContent_MakeAvailable(xbyak)
+    set(BB_XBYAK_INCLUDE_DIR ${xbyak_SOURCE_DIR})
+endif()
 find_package(tsl-robin-map REQUIRED)
-find_package(VulkanMemoryAllocator CONFIG REQUIRED)
+find_package(VulkanMemoryAllocator CONFIG QUIET)
+if (NOT VulkanMemoryAllocator_FOUND)
+    find_path(BB_VMA_INCLUDE_DIR vk_mem_alloc.h PATH_SUFFIXES vma REQUIRED)
+    add_library(bb_vma_headers INTERFACE)
+    target_include_directories(bb_vma_headers INTERFACE ${BB_VMA_INCLUDE_DIR})
+    add_library(GPUOpen::VulkanMemoryAllocator ALIAS bb_vma_headers)
+endif()
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(XXHASH REQUIRED IMPORTED_TARGET libxxhash)
 pkg_check_modules(SDL3 REQUIRED IMPORTED_TARGET sdl3)
-pkg_check_modules(X11 REQUIRED IMPORTED_TARGET x11)
-find_package(miniz REQUIRED)
+if (WIN32)
+    # SDL's .pc chooses the GUI subsystem. The loader and diagnostics need stdout.
+    get_target_property(BB_SDL3_LINK_OPTIONS PkgConfig::SDL3 INTERFACE_LINK_OPTIONS)
+    if (BB_SDL3_LINK_OPTIONS)
+        list(REMOVE_ITEM BB_SDL3_LINK_OPTIONS -mwindows)
+        set_target_properties(PkgConfig::SDL3 PROPERTIES
+            INTERFACE_LINK_OPTIONS "${BB_SDL3_LINK_OPTIONS}")
+    endif()
+endif()
+if (NOT WIN32)
+    pkg_check_modules(X11 REQUIRED IMPORTED_TARGET x11)
+endif()
+if (WIN32)
+    find_package(miniz CONFIG QUIET)
+    if (NOT miniz_FOUND)
+        set(BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
+        FetchContent_Declare(miniz
+            URL https://codeload.github.com/richgel999/miniz/tar.gz/refs/tags/3.1.0
+            URL_HASH SHA256=09569fc19d060ac9f5999ba9356728c2494ebe6a24ac0eb0a6b6ae3d396cfea6
+            DOWNLOAD_EXTRACT_TIMESTAMP TRUE)
+        FetchContent_MakeAvailable(miniz)
+        add_library(miniz::miniz ALIAS miniz)
+    endif()
+else()
+    find_package(miniz REQUIRED)
+endif()
 find_package(Zydis REQUIRED)
 find_program(GLSLANG_COMPILER NAMES glslang glslangValidator REQUIRED)
 
@@ -61,6 +115,19 @@ add_subdirectory(third_party/sirit EXCLUDE_FROM_ALL)
 set(FFX_VK_PORTABLE_BUILD_TESTS OFF CACHE BOOL "" FORCE)
 set(FFX_VK_PORTABLE_BUILD_PROBE OFF CACHE BOOL "" FORCE)
 add_subdirectory(third_party/fsr-vulkan EXCLUDE_FROM_ALL)
+if (MINGW)
+    # AMD's Windows sources rely on headers included transitively by MSVC.
+    foreach(FFX_TARGET IN ITEMS ffx_vulkan_fsr3_host_1_1_4
+            ffx_vulkan_fsr3_sdk_core_3_1_5_scaffold
+            ffx_vulkan_fsr3_vk_backend_1_1_4
+            ffx_vulkan_fsr3_vk_backend_3_1_5
+            ffx_vulkan_fsr3_vk_framegeneration_3_1_6)
+        if (TARGET ${FFX_TARGET})
+            target_compile_options(${FFX_TARGET} PRIVATE
+                -include ${CMAKE_CURRENT_SOURCE_DIR}/shim/bbport_fsr_windows.h)
+        endif()
+    endforeach()
+endif()
 
 # Host shaders -> headers (same scheme as shadPS4's host_shaders/CMakeLists.txt).
 set(SHADER_SRC ${CMAKE_CURRENT_SOURCE_DIR}/shadps4/video_core/host_shaders)
@@ -116,7 +183,15 @@ set(COMMON
 file(GLOB AVPLAYER CONFIGURE_DEPENDS shadps4/core/libraries/avplayer/*.cpp)
 pkg_check_modules(FFMPEG REQUIRED IMPORTED_TARGET libavformat libavcodec libavutil libswscale libswresample)
 file(GLOB SHIM_SOURCES CONFIGURE_DEPENDS shim/*.cpp shim/*/*.cpp)
-add_library(bbgpu SHARED ${VIDEO_CORE} ${RECOMPILER} ${COMMON} ${SHIM_SOURCES}
+if (WIN32)
+    # The GPU calls back into the C runtime. A static library lets the final
+    # Windows executable resolve those symbols without a circular DLL import.
+    set(BBGPU_LIBRARY_TYPE STATIC)
+    list(APPEND COMMON shadps4/common/ntapi.cpp)
+else()
+    set(BBGPU_LIBRARY_TYPE SHARED)
+endif()
+add_library(bbgpu ${BBGPU_LIBRARY_TYPE} ${VIDEO_CORE} ${RECOMPILER} ${COMMON} ${SHIM_SOURCES}
     shadps4/core/libraries/gnmdriver/gnmdriver.cpp
     shadps4/core/libraries/videoout/driver.cpp shadps4/core/libraries/videoout/video_out.cpp
     shadps4/core/libraries/kernel/equeue.cpp ${AVPLAYER}
@@ -133,13 +208,36 @@ target_compile_definitions(bbgpu PRIVATE IMGUI_IMPL_VULKAN_NO_PROTOTYPES
 set_source_files_properties(shim/bbport_overlay.cpp PROPERTIES
     OBJECT_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/third_party/fonts/DejaVuSans.ttf)
 target_include_directories(bbgpu PRIVATE shim shadps4 ${SHADER_INCLUDE} third_party/gcn/include third_party/half/include)
+if (BB_XBYAK_INCLUDE_DIR)
+    set_source_files_properties(shadps4/shader_recompiler/ir/passes/flatten_extended_userdata_pass.cpp
+        PROPERTIES INCLUDE_DIRECTORIES ${BB_XBYAK_INCLUDE_DIR})
+endif()
 target_compile_definitions(bbgpu PRIVATE BOOST_ASIO_STANDALONE NDEBUG)
 target_compile_options(bbgpu PRIVATE -Wno-deprecated-declarations -Wno-missing-field-initializers)
 # Runtime symbols (runtime_memory_*, runtime_process_*) resolve against bb-probe.
-target_link_options(bbgpu PRIVATE -Wl,--allow-shlib-undefined)
+if (WIN32)
+    target_compile_definitions(bbgpu PUBLIC NOMINMAX WIN32_LEAN_AND_MEAN _WIN32_WINNT=0x0A00)
+    target_compile_options(bbgpu PRIVATE -include ${CMAKE_CURRENT_SOURCE_DIR}/shim/bbport_windows.h)
+    target_link_libraries(bbgpu PUBLIC shell32 ole32 ws2_32)
+else()
+    target_link_options(bbgpu PRIVATE -Wl,--allow-shlib-undefined)
+    target_link_libraries(bbgpu PUBLIC PkgConfig::X11)
+endif()
 target_link_libraries(bbgpu PRIVATE ffx-vulkan::portable ffx-vulkan::fsr4-v07-vulkan)
 target_link_libraries(bbgpu PUBLIC Vulkan::Headers fmt::fmt Boost::headers magic_enum::magic_enum
-    tsl::robin_map GPUOpen::VulkanMemoryAllocator PkgConfig::XXHASH PkgConfig::SDL3 PkgConfig::X11 PkgConfig::FFMPEG miniz::miniz Zydis::Zydis sirit)
+    tsl::robin_map GPUOpen::VulkanMemoryAllocator PkgConfig::XXHASH PkgConfig::SDL3 PkgConfig::FFMPEG miniz::miniz Zydis::Zydis sirit)
+
+if (WIN32 AND TARGET bbruntime AND TARGET atrac9)
+    add_executable(windows-renderer-smoke EXCLUDE_FROM_ALL tools/windows_renderer_smoke.cpp)
+    target_include_directories(windows-renderer-smoke PRIVATE shim shadps4)
+    target_link_libraries(windows-renderer-smoke PRIVATE
+        "$<LINK_GROUP:RESCAN,bbruntime,bbgpu,atrac9>")
+    add_executable(avplayer-stop-test EXCLUDE_FROM_ALL tools/avplayer_stop_test.cpp)
+    target_compile_options(avplayer-stop-test PRIVATE -UNDEBUG)
+    target_include_directories(avplayer-stop-test PRIVATE shim shadps4)
+    target_link_libraries(avplayer-stop-test PRIVATE
+        "$<LINK_GROUP:RESCAN,bbruntime,bbgpu,atrac9>")
+endif()
 
 # Explicit test targets; neither launches the game nor needs a Vulkan device.
 add_executable(motion-history-test EXCLUDE_FROM_ALL ../tests/test_motion_history.cpp)

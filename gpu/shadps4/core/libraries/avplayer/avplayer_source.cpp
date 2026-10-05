@@ -1,8 +1,10 @@
+// Windows port modifications by yaonikaixin999999, 2026-10-05.
 // SPDX-FileCopyrightText: Copyright 2024-2026 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include "common/alignment.h"
 #include "common/singleton.h"
+#include "common/scope_exit.h"
 #include "common/thread.h"
 #include "core/libraries/avplayer/avplayer_error.h"
 #include "core/libraries/avplayer/avplayer_file_streamer.h"
@@ -294,14 +296,33 @@ bool AvPlayerSource::Start() {
             m_audio_buffers.Push(GuestBuffer(m_memory_replacement, 0x10, size, false));
         }
     }
+    m_decoders_running = unsigned(m_video_stream_index.has_value()) +
+                         unsigned(m_audio_stream_index.has_value());
     m_demuxer_thread.Run([this](std::stop_token stop) { this->DemuxerThread(stop); });
-    m_video_decoder_thread.Run([this](std::stop_token stop) { this->VideoDecoderThread(stop); });
-    m_audio_decoder_thread.Run([this](std::stop_token stop) { this->AudioDecoderThread(stop); });
+    if (m_video_stream_index) {
+        m_video_decoder_thread.Run([this](std::stop_token stop) {
+            SCOPE_EXIT {
+                --m_decoders_running;
+                m_decoders_done_cv.Notify();
+            };
+            this->VideoDecoderThread(stop);
+        });
+    }
+    if (m_audio_stream_index) {
+        m_audio_decoder_thread.Run([this](std::stop_token stop) {
+            SCOPE_EXIT {
+                --m_decoders_running;
+                m_decoders_done_cv.Notify();
+            };
+            this->AudioDecoderThread(stop);
+        });
+    }
     m_start_time = std::chrono::high_resolution_clock::now();
     return true;
 }
 
 bool AvPlayerSource::Stop() {
+    AvPlayerTrace(this, "source stop enter");
     std::unique_lock lock(m_state_mutex);
 
     if (!HasRunningThreads()) {
@@ -309,13 +330,21 @@ bool AvPlayerSource::Stop() {
         return false;
     }
 
-    if (m_up_data_streamer) {
-        m_up_data_streamer->Reset();
-    }
+    // One owner manages the handles. Cancelling every worker before joining prevents
+    // a demuxer/decoder from waiting on another worker whose cancellation is pending.
+    m_video_decoder_thread.RequestStop();
+    m_audio_decoder_thread.RequestStop();
+    m_demuxer_thread.RequestStop();
+    AvPlayerTrace(this, "source workers cancellation requested");
+    m_video_decoder_thread.Join();
+    AvPlayerTrace(this, "source video joined");
+    m_audio_decoder_thread.Join();
+    AvPlayerTrace(this, "source audio joined");
+    m_demuxer_thread.Join();
+    AvPlayerTrace(this, "source demux joined");
 
-    m_video_decoder_thread.Stop();
-    m_audio_decoder_thread.Stop();
-    m_demuxer_thread.Stop();
+    if (m_up_data_streamer) m_up_data_streamer->Reset();
+    AvPlayerTrace(this, "source streamer reset");
 
     m_current_audio_frame.reset();
     m_current_video_frame.reset();
@@ -326,6 +355,7 @@ bool AvPlayerSource::Stop() {
     m_video_packets.Clear();
     m_audio_frames.Clear();
     m_video_frames.Clear();
+    AvPlayerTrace(this, "source buffers released");
 
     m_last_audio_ts.reset();
     m_last_data_time.reset();
@@ -336,15 +366,18 @@ bool AvPlayerSource::Stop() {
     m_is_paused = false;
     m_is_eof = false;
 
+    AvPlayerTrace(this, "source stop done");
     return true;
 }
 
 void AvPlayerSource::Pause() {
+    std::lock_guard guard(m_state_mutex);
     m_pause_time = std::chrono::high_resolution_clock::now();
     m_is_paused = true;
 }
 
 void AvPlayerSource::Resume() {
+    std::lock_guard guard(m_state_mutex);
     m_pause_duration += std::chrono::high_resolution_clock::now() - m_pause_time;
     m_is_paused = false;
 }
@@ -364,6 +397,7 @@ bool AvPlayerSource::GetVideoData(AvPlayerFrameInfo& video_info) {
 }
 
 bool AvPlayerSource::GetVideoData(AvPlayerFrameInfoEx& video_info) {
+    std::lock_guard guard(m_state_mutex);
     if (!IsActive() || m_is_paused) {
         return false;
     }
@@ -372,7 +406,7 @@ bool AvPlayerSource::GetVideoData(AvPlayerFrameInfoEx& video_info) {
         return false;
     }
 
-    const auto current_time = CurrentTime();
+    const auto current_time = CurrentTimeLocked();
     const auto& new_frame = m_video_frames.Front();
     if (m_state.GetSyncMode() == AvPlayerAvSyncMode::Default) {
         if (new_frame.info.timestamp > current_time) {
@@ -394,6 +428,7 @@ bool AvPlayerSource::GetVideoData(AvPlayerFrameInfoEx& video_info) {
 }
 
 bool AvPlayerSource::GetAudioData(AvPlayerFrameInfo& audio_info) {
+    std::lock_guard guard(m_state_mutex);
     if (!IsActive() || m_is_paused) {
         return false;
     }
@@ -463,6 +498,11 @@ u64 AvPlayerSource::DurationMillis() const {
 }
 
 u64 AvPlayerSource::CurrentTime() {
+    std::lock_guard guard(m_state_mutex);
+    return CurrentTimeLocked();
+}
+
+u64 AvPlayerSource::CurrentTimeLocked() {
     if (!m_start_time.has_value()) {
         return 0;
     }
@@ -493,7 +533,8 @@ u64 AvPlayerSource::CurrentTime() {
 }
 
 bool AvPlayerSource::IsActive() {
-    return !m_is_eof || m_audio_packets.Size() != 0 || m_video_packets.Size() != 0 ||
+    return !m_is_eof || m_decoders_running != 0 ||
+           m_audio_packets.Size() != 0 || m_video_packets.Size() != 0 ||
            m_video_frames.Size() != 0 || m_audio_frames.Size() != 0;
 }
 
@@ -599,12 +640,13 @@ void AvPlayerSource::DemuxerThread(std::stop_token stop) {
     m_video_buffers_cv.Notify();
     m_audio_buffers_cv.Notify();
 
-    m_video_decoder_thread.Join();
-    m_audio_decoder_thread.Join();
-    m_state.OnEOF();
+    // Preserve EOF ordering without touching decoder thread handles from this worker.
+    // The stop token also releases this wait when a movie is skipped with full buffers.
+    if (m_decoders_done_cv.Wait(stop, [this] { return m_decoders_running == 0; })) {
+        if (!stop.stop_requested()) m_state.OnEOF();
+    }
 
     LOG_INFO(Lib_AvPlayer, "Demuxer Thread exited normally");
-    m_demuxer_thread.Join();
 }
 
 AvPlayerSource::AVFramePtr AvPlayerSource::ConvertVideoFrame(const AVFrame& frame) {
@@ -705,7 +747,7 @@ void AvPlayerSource::VideoDecoderThread(std::stop_token stop) {
     LOG_INFO(Lib_AvPlayer, "Video Decoder Thread started");
     while ((!m_is_eof || m_video_packets.Size() != 0) && !stop.stop_requested()) {
         if (m_video_packets.Size() == 0 &&
-            !m_video_packets_cv.Wait(stop, [this] { return m_video_packets.Size() != 0; })) {
+            !m_video_packets_cv.Wait(stop, [this] { return m_is_eof || m_video_packets.Size() != 0; })) {
             continue;
         }
         const auto packet = m_video_packets.Pop();
@@ -760,7 +802,6 @@ void AvPlayerSource::VideoDecoderThread(std::stop_token stop) {
     }
 
     LOG_INFO(Lib_AvPlayer, "Video Decoder Thread exited normally");
-    m_video_decoder_thread.Join();
 }
 
 AvPlayerSource::AVFramePtr AvPlayerSource::ConvertAudioFrame(const AVFrame& frame) {
@@ -828,7 +869,7 @@ void AvPlayerSource::AudioDecoderThread(std::stop_token stop) {
     LOG_INFO(Lib_AvPlayer, "Audio Decoder Thread started");
     while ((!m_is_eof || m_audio_packets.Size() != 0) && !stop.stop_requested()) {
         if (m_audio_packets.Size() == 0 &&
-            !m_audio_packets_cv.Wait(stop, [this] { return m_audio_packets.Size() != 0; })) {
+            !m_audio_packets_cv.Wait(stop, [this] { return m_is_eof || m_audio_packets.Size() != 0; })) {
             continue;
         }
         const auto packet = m_audio_packets.Pop();
@@ -879,7 +920,6 @@ void AvPlayerSource::AudioDecoderThread(std::stop_token stop) {
     }
 
     LOG_INFO(Lib_AvPlayer, "Audio Decoder Thread exited normally");
-    m_audio_decoder_thread.Join();
 }
 
 bool AvPlayerSource::HasRunningThreads() const {

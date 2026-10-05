@@ -1,3 +1,4 @@
+# Windows port modifications by yaonikaixin999999, 2026-10-05.
 """Cross-module identity and TLS relocation tests without game binaries."""
 from paths import ROOT
 import json
@@ -24,12 +25,12 @@ class LinkTests(unittest.TestCase):
                   tags={12:0},symbols=symbols,relocs=list(relocs),sha256='fixture')
         return main,libc
 
-    def run_link(self,main,libc,code=b'\xc3'):
+    def run_link(self,main,libc,code=b'\xc3',target='linux'):
         with tempfile.TemporaryDirectory() as tmp:
             out=Path(tmp)
             (out/'boot.bin').write_bytes(package(code,names=['fixture#q#q'],capabilities=1))
             with patch.object(link_libc,'module',side_effect=[main,libc]):
-                link_libc.link(Path('fixture-game'),out)
+                link_libc.link(Path('fixture-game'),out,target)
             return (out/'boot-libc.bin').read_bytes(),json.loads((out/'libc-link.json').read_text())
 
     def test_different_local_ids_bind_same_identity(self):
@@ -80,3 +81,26 @@ class LinkTests(unittest.TestCase):
         image=data[-struct.unpack_from('<Q',data,8)[0]:]
         self.assertEqual(image[0],0x64)
         self.assertEqual(report['fs_loads_patched'],0)
+
+    def test_windows_tls_uses_teb_user_pointer_in_eboot_and_libc(self):
+        main,libc=self.fixture()
+        load=link_libc.FS_LOAD
+        main['ph'].append(dict(type=1,vaddr=0,filesz=64,memsz=64,flags=5))
+        libc['elf']=load+libc['elf'][len(load):]
+        data,report=self.run_link(main,libc,load,target='windows')
+        image=data[-struct.unpack_from('<Q',data,8)[0]:]
+        expected=bytes.fromhex('65488b042528000000')
+        self.assertEqual(image[:len(load)],expected)
+        self.assertEqual(image[65536:65536+len(load)],expected)
+        self.assertEqual(report['tls_target'],'windows')
+        self.assertEqual(report['fs_loads_patched'],2)
+
+    def test_windows_tls_keeps_data_and_partial_instructions(self):
+        load=link_libc.FS_LOAD
+        image=bytearray(load+load+load[:-1])
+        headers=[dict(type=1,vaddr=0,filesz=9,flags=6),
+                 dict(type=1,vaddr=9,filesz=17,flags=5)]
+        self.assertEqual(link_libc.patch_fs_loads(image,headers,target='windows'),1)
+        self.assertEqual(image[:9],load)
+        self.assertEqual(image[9:18],bytes.fromhex('65488b042528000000'))
+        self.assertEqual(image[18:],load[:-1])

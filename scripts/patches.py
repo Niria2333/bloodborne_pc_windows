@@ -1,3 +1,4 @@
+# Windows port modifications by yaonikaixin999999, 2026-10-05.
 """Compile selected shadPS4/GoldHEN XML patches into out/patches.bin for the loader.
 
 Patch addresses are PS4 virtual addresses (eboot base 0x400000); the loader's
@@ -73,7 +74,7 @@ UI_HEIGHT=0x0235855D-EBOOT_BASE
 def read_settings(path):
     settings={}
     if path.exists():
-        for line in path.read_text().splitlines():
+        for line in path.read_text(encoding='utf-8-sig').splitlines():
             key,sep,value=line.partition('=')
             if sep and not line.startswith('#'): settings[key.strip()]=value.strip()
     return settings

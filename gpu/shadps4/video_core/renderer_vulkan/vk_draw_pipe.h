@@ -1,3 +1,4 @@
+// Windows port modifications by yaonikaixin999999, 2026-10-05.
 // SPDX-License-Identifier: GPL-2.0-or-later
 // bbport: two-stage draw pipeline (docs/parallel_gpu.md, "Two-stage draw pipeline").
 //
@@ -159,7 +160,7 @@ private:
     void Run(std::stop_token stop) {
         Common::SetCurrentThreadName("bb:DrawRec");
         on_stage_b = true;
-        stage_b_tid.store(static_cast<u32>(gettid()), std::memory_order_release);
+        stage_b_tid.store(BbThreads::CurrentId(), std::memory_order_release);
         u64 at = 0;
         while (true) {
             // Packets follow each other within microseconds while a frame is decoded: spin,

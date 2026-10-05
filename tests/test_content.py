@@ -1,13 +1,15 @@
+# Windows port modifications by yaonikaixin999999, 2026-10-05.
 from paths import ROOT
 from pathlib import Path
 import struct
+import os
 import subprocess
 import tempfile
 import unittest
 from unittest.mock import patch
 import content_profile
 
-EXE=ROOT/'out/content-test'
+EXE=Path(os.environ.get('BB_TEST_CONTENT',str(ROOT/'out/content-test')))
 
 class ProfileTests(unittest.TestCase):
     def test_sfo_parameters_and_explicit_trial_profile(self):

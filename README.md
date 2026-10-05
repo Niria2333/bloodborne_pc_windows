@@ -1,6 +1,6 @@
 # 血源 bbport Windows 原生移植 / Bloodborne native Windows port
 
-这是发布在 [yaonikaixin999999](https://github.com/yaonikaixin999999/bloodborne_pc_windows) 账号下的独立开源项目，基于 [deadinside28/bloodborne_pc](https://github.com/deadinside28/bloodborne_pc) 开展 Windows x64 适配。**保留原作者版权、完整上游历史、GPL-2.0-or-later 许可证与第三方署名**。Windows 新增工作不代表整个项目从零原创。
+基于 [deadinside28/bloodborne_pc](https://github.com/deadinside28/bloodborne_pc) 开展 Windows x64 适配。
 
 目前已实现原生 Windows 运行库、Vulkan 渲染器、中文启动器、开场黑屏与音频等待修复，以及全屏、可选 Xbox 按键映射和角色命名键盘。CUSA03023 1.09 已进入实际关卡，用户确认可正常命名并进入游戏；1080p 着色器预热后观察到 60 FPS，首次着色器编译时仍有短暂掉帧。
 

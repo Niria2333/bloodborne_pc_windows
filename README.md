@@ -1,4 +1,4 @@
-# 血源 bbport Windows 原生移植 / Bloodborne native Windows port
+# 血源诅咒 Windows 原生移植 / Bloodborne native Windows port
 
 基于 [deadinside28/bloodborne_pc](https://github.com/deadinside28/bloodborne_pc) 开展 Windows x64 适配。
 

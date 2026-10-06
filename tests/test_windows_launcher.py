@@ -3,10 +3,13 @@
 """Validate game gating and the 60 FPS/4K preparation path without game data."""
 from paths import ROOT
 import importlib.util
+import io
 import json
 import os
 from pathlib import Path
 import struct
+import subprocess
+import sys
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -39,6 +42,47 @@ def language_fixture(game,folder):
         (directory/name).write_bytes(b'fixture')
 
 class WindowsLauncherTests(unittest.TestCase):
+    def test_pythonw_launcher_uses_the_matching_console_worker(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            pythonw=Path(tmp)/'pythonw.exe'
+            python=pythonw.with_name('python.exe')
+            python.write_bytes(b'fixture')
+            with patch.object(launcher.sys,'executable',str(pythonw)):
+                self.assertEqual(launcher.console_python(),str(python))
+                python.unlink()
+                with self.assertRaisesRegex(ValueError,'python.exe'):
+                    launcher.console_python()
+            with patch.object(launcher.sys,'executable',str(python)):
+                self.assertEqual(launcher.console_python(),str(python))
+
+    def test_hidden_worker_preserves_native_stdout_stderr_and_exit_status(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp)
+            native='import os,sys; os.write(1,b"native stdout\\n"); os.write(2,b"native stderr\\n"); sys.exit(23)'
+            (root/'run_windows.py').write_text(
+                'import subprocess,sys\nprint("worker stdout",flush=True)\n'
+                f'sys.exit(subprocess.call([sys.executable,"-c",{native!r}]))\n',encoding='utf-8')
+            executable=Path(sys.executable)
+            if os.name=='nt': executable=executable.with_name('pythonw.exe')
+            log=root/'last-run.log'
+            with log.open('wb') as handle,patch.object(launcher,'ROOT',root), \
+                 patch.object(launcher.sys,'executable',str(executable)):
+                process=launcher.start_worker([],handle)
+                self.assertEqual(process.wait(timeout=10),23)
+            output=log.read_text(encoding='utf-8')
+            for line in ('worker stdout','native stdout','native stderr'):
+                self.assertIn(line,output)
+
+    def test_entry_point_preserves_native_failure_code(self):
+        stderr=io.StringIO()
+        with patch.object(launcher,'main',side_effect=subprocess.CalledProcessError(23,['bb-probe.exe'])), \
+             patch.object(launcher.sys,'stderr',stderr):
+            self.assertEqual(launcher.run(),23)
+        self.assertIn('exit status 23',stderr.getvalue())
+        with patch.object(launcher,'main',side_effect=ValueError('invalid game')), \
+             patch.object(launcher.sys,'stderr',io.StringIO()):
+            self.assertEqual(launcher.run(),1)
+
     def test_parent_resolution_overrides_do_not_desynchronize_patches_and_renderer(self):
         inherited={'BB_UPSCALER':'off','BB_UPSCALE_PRESET':'4','BB_RENDER_RES':'640x360',
                    'BB_OUTPUT_RES':'1280x720','BB_FPS':'90','BB_VBLANK_HZ':'90',

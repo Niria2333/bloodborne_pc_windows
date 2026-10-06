@@ -27,12 +27,19 @@ public:
     SDL_Window* GetSDLWindow() const { return window; }
     WindowSystemInfo GetWindowInfo() const { return window_info; }
     bool IsOpen() const { return is_open.load(std::memory_order_relaxed); }
+    /// A minimized/hidden window, or an unfocused fullscreen window, cannot be presented to.
+    bool IsPresentationAvailable() const {
+        return presentation_available.load(std::memory_order_acquire);
+    }
     /// Processes pending window events. Returns false once the user closed the window.
     bool PollEvents();
 
 private:
+    void UpdatePresentationState();
+
     std::atomic<s32> width, height;
     std::atomic<bool> is_open{true};
+    std::atomic<bool> presentation_available{true};
     SDL_Window* window{};
     WindowSystemInfo window_info{};
 };

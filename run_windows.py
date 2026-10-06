@@ -133,6 +133,24 @@ def renderer_path():
     packaged=ROOT/'dist/windows/bb-probe.exe'
     return packaged if packaged.is_file() else ROOT/'out/windows/bin/bb-probe.exe'
 
+def console_python():
+    executable=Path(sys.executable)
+    if executable.name.lower()=='pythonw.exe':
+        # pythonw can write its redirected Python streams, but its native children
+        # inherit invalid CRT standard handles. A hidden console worker keeps the
+        # preparation tools and renderer attached to last-run.log as well.
+        executable=executable.with_name('python.exe')
+        if not executable.is_file():
+            raise ValueError('缺少 python.exe；请将它与 pythonw.exe 一起保留，以便记录游戏日志。')
+    return str(executable)
+
+def start_worker(arguments,log_handle):
+    child_env=runtime_environment()
+    child_env.update(PYTHONIOENCODING='utf-8',PYTHONUNBUFFERED='1')
+    return subprocess.Popen([console_python(),'-u',str(ROOT/'run_windows.py'),*arguments],
+                            cwd=ROOT,env=child_env,stdout=log_handle,stderr=subprocess.STDOUT,
+                            creationflags=getattr(subprocess,'CREATE_NO_WINDOW',0))
+
 def execute(command,env):
     subprocess.run([str(v) for v in command],cwd=ROOT,env=env,check=True)
 
@@ -329,16 +347,13 @@ def gui(game_dir=None,resolution=None,language=None,fullscreen=None,controller_l
             log_path=ROOT/'out/windows-data/last-run.log'
             log_path.parent.mkdir(parents=True,exist_ok=True)
             log_handle=log_path.open('w',encoding='utf-8')
-            child_env=runtime_environment(); child_env.update(PYTHONIOENCODING='utf-8',PYTHONUNBUFFERED='1')
-            process=subprocess.Popen([sys.executable,str(ROOT/'run_windows.py'),'--game',game.get(),
+            process=start_worker(['--game',game.get(),
                               '--language',LANGUAGE_LABELS[chosen_language.get()],
                               '--fps',FPS_LABELS[chosen_fps.get()],
                               '--controller-layout',chosen_controller_layout(),
                               '--vsync' if chosen_vsync.get() else '--no-vsync',
                               '--sync-refresh' if chosen_sync_refresh.get() else '--no-sync-refresh',
-                              '--fullscreen' if chosen_fullscreen.get() else '--windowed'],cwd=ROOT,env=child_env,
-                              stdout=log_handle,stderr=subprocess.STDOUT,
-                              creationflags=getattr(subprocess,'CREATE_NO_WINDOW',0))
+                              '--fullscreen' if chosen_fullscreen.get() else '--windowed'],log_handle)
             start_button.configure(state='disabled'); status.set('正在准备或运行；日志实时保存在 out/windows-data/last-run.log。')
             root.after(500,monitor)
         except (ValueError,OSError) as error:
@@ -394,8 +409,13 @@ def main():
            controller_layout=args.controller_layout,fps=args.fps,vsync=args.vsync,sync_refresh=args.sync_refresh)
     return 0
 
-if __name__=='__main__':
-    try: sys.exit(main())
-    except (ValueError,OSError,subprocess.CalledProcessError) as error:
+def run():
+    try: return main()
+    except subprocess.CalledProcessError as error:
+        print(f'运行失败：{error}',file=sys.stderr)
+        return error.returncode
+    except (ValueError,OSError) as error:
         print(f'无法启动：{error}',file=sys.stderr)
-        sys.exit(1)
+        return 1
+
+if __name__=='__main__': sys.exit(run())

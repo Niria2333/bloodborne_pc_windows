@@ -580,20 +580,31 @@ void Presenter::Present(Frame* frame, bool is_reusing_frame, bool is_game_frame)
         }
     };
 
-    // Recreate the swapchain if the window was resized.
-    if (window.GetWidth() != swapchain.GetWidth() || window.GetHeight() != swapchain.GetHeight()) {
-        swapchain.Recreate(window.GetWidth(), window.GetHeight());
+    const s32 window_width = window.GetWidth();
+    const s32 window_height = window.GetHeight();
+    if (!window.IsPresentationAvailable() || window_width <= 0 || window_height <= 0) {
+        // Keep draining guest flips in the background, but do not reset a presentation fence
+        // or retain a frame while the fullscreen surface is minimized by Alt+Tab.
+        free_frame();
+        return;
+    }
+
+    // Recreate only when a drawable surface is available. Focus transitions may invalidate it
+    // without changing SDL's saved window dimensions.
+    if (swapchain.NeedsRecreation() || window_width != swapchain.GetWidth() ||
+        window_height != swapchain.GetHeight()) {
+        if (!swapchain.Recreate(window_width, window_height)) {
+            free_frame();
+            return;
+        }
     }
 
     const auto acquire_start = trace_present ? TimingClock::now() : TimingClock::time_point{};
     if (!swapchain.AcquireNextImage()) {
-        swapchain.Recreate(window.GetWidth(), window.GetHeight());
-        if (!swapchain.AcquireNextImage()) {
-            // User resizes the window too fast and GPU can't keep up. Skip this frame.
-            LOG_WARNING(Render_Vulkan, "Skipping frame!");
-            free_frame();
-            return;
-        }
+        // A timeout or display transition has not acquired an image or signaled its semaphore.
+        // Recreate on the next frame when required, after SDL can finish the focus transition.
+        free_frame();
+        return;
     }
     if (trace_present) {
         acquire_end = TimingClock::now();
@@ -737,13 +748,12 @@ void Presenter::Present(Frame* frame, bool is_reusing_frame, bool is_game_frame)
         if (trace_present) {
             present_start = TimingClock::now();
         }
-        const bool presented = swapchain.Present();
+        swapchain.Present();
         if (trace_present) {
             present_end = TimingClock::now();
         }
-        if (!presented) {
-            swapchain.Recreate(window.GetWidth(), window.GetHeight());
-        }
+        // Any required recreation is deferred to the next drawable frame. In particular,
+        // fullscreen focus loss must not recreate a zero-sized surface here.
     }
     if (trace_present) {
         timing.Record(present_start, present_end, is_game_frame, is_reusing_frame,
@@ -790,6 +800,19 @@ Frame* Presenter::GetRenderFrame() {
 
     if (frame->width != expected_frame_width || frame->height != expected_frame_height ||
         frame->is_hdr != swapchain.GetHDR()) {
+        // A skipped presentation leaves present_done signaled from the previous use. Its
+        // latest draw/blank-frame work must finish before resizing destroys the old image.
+        if (frame->ready_semaphore) {
+            const vk::SemaphoreWaitInfo ready_wait{
+                .semaphoreCount = 1,
+                .pSemaphores = &frame->ready_semaphore,
+                .pValues = &frame->ready_tick,
+            };
+            const auto ready_result = device.waitSemaphores(ready_wait, std::numeric_limits<u64>::max());
+            ASSERT_MSG(ready_result == vk::Result::eSuccess,
+                       "Failed waiting for frame preparation before resize: {}",
+                       vk::to_string(ready_result));
+        }
         RecreateFrame(frame, expected_frame_width, expected_frame_height);
     }
 
@@ -797,14 +820,19 @@ Frame* Presenter::GetRenderFrame() {
 }
 
 void Presenter::SetExpectedGameSize(s32 width, s32 height) {
+    if (width <= 0 || height <= 0) {
+        // Win32's minimized surface is zero-sized. Preserve the last valid game image size;
+        // allocating a 0x0 frame on the GPU thread otherwise terminates the game.
+        return;
+    }
     const float ratio = (float)width / (float)height;
 
     expected_frame_height = height;
     expected_frame_width = width;
     if (ratio > expected_ratio) {
-        expected_frame_width = static_cast<s32>(height * expected_ratio);
+        expected_frame_width = std::max(1, static_cast<s32>(height * expected_ratio));
     } else {
-        expected_frame_height = static_cast<s32>(width / expected_ratio);
+        expected_frame_height = std::max(1, static_cast<s32>(width / expected_ratio));
     }
 }
 

@@ -2,7 +2,9 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <algorithm>
+#include <chrono>
 #include <limits>
+#include <thread>
 #include "common/assert.h"
 #include "common/logging/log.h"
 #include "core/emulator_settings.h"
@@ -23,7 +25,11 @@ Swapchain::Swapchain(const Instance& instance_, const Frontend::WindowSDL& windo
     FindPresentFormat();
     FindPresentMode();
 
-    Create(window.GetWidth(), window.GetHeight());
+    // SDL can lose fullscreen focus while the renderer is starting. Wait for a drawable
+    // surface instead of creating a zero-sized swapchain or an empty presentation frame pool.
+    while (!Create(window.GetWidth(), window.GetHeight())) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(16));
+    }
     ImGui::Core::Initialize(instance, window, image_count, surface_format.format);
 }
 
@@ -32,14 +38,28 @@ Swapchain::~Swapchain() {
     instance.GetInstance().destroySurfaceKHR(surface);
 }
 
-void Swapchain::Create(u32 width_, u32 height_) {
+bool Swapchain::Create(u32 width_, u32 height_) {
     width = width_;
     height = height_;
-    needs_recreation = false;
+    needs_recreation = true;
+
+    if (!window.IsPresentationAvailable() || width == 0 || height == 0) {
+        return false;
+    }
+
+    if (needs_surface_recreation) {
+        Destroy();
+        instance.GetInstance().destroySurfaceKHR(surface);
+        surface = CreateSurface(instance.GetInstance(), window);
+        needs_surface_recreation = false;
+    }
+    // A minimized Win32 Vulkan surface can report a zero currentExtent even before SDL's
+    // window thread observes the minimize event. Keep the old resources until it is drawable.
+    if (!SetSurfaceProperties()) {
+        return false;
+    }
 
     Destroy();
-
-    SetSurfaceProperties();
 
     const std::array queue_family_indices = {
         instance.GetGraphicsQueueFamilyIndex(),
@@ -71,18 +91,29 @@ void Swapchain::Create(u32 width_, u32 height_) {
     };
 
     auto [swapchain_result, chain] = instance.GetDevice().createSwapchainKHR(swapchain_info);
+    if (swapchain_result == vk::Result::eErrorOutOfDateKHR ||
+        swapchain_result == vk::Result::eErrorSurfaceLostKHR) {
+        needs_surface_recreation = swapchain_result == vk::Result::eErrorSurfaceLostKHR;
+        LOG_DEBUG(Render_Vulkan, "Deferring swapchain creation during display transition: {}",
+                  vk::to_string(swapchain_result));
+        return false;
+    }
     ASSERT_MSG(swapchain_result == vk::Result::eSuccess, "Failed to create swapchain: {}",
                vk::to_string(swapchain_result));
     swapchain = chain;
 
     SetupImages();
     RefreshSemaphores();
+    frame_index = 0;
+    image_index = 0;
+    needs_recreation = false;
+    return true;
 }
 
-void Swapchain::Recreate(u32 width_, u32 height_) {
+bool Swapchain::Recreate(u32 width_, u32 height_) {
     LOG_DEBUG(Render_Vulkan, "Recreate the swapchain: width={} height={} HDR={}", width_, height_,
               needs_hdr);
-    Create(width_, height_);
+    return Create(width_, height_);
 }
 
 void Swapchain::SetHDR(bool hdr) {
@@ -103,19 +134,34 @@ void Swapchain::SetHDR(bool hdr) {
 }
 
 bool Swapchain::AcquireNextImage() {
+    if (needs_recreation || !swapchain || !window.IsPresentationAvailable()) {
+        return false;
+    }
     vk::Device device = instance.GetDevice();
+    // An infinite acquire can trap the presenter throughout a fullscreen focus transition,
+    // retaining every free frame and eventually stalling the guest's flip queue.
+    constexpr u64 acquire_timeout_ns = 100'000'000;
     vk::Result result =
-        device.acquireNextImageKHR(swapchain, std::numeric_limits<u64>::max(),
+        device.acquireNextImageKHR(swapchain, acquire_timeout_ns,
                                    image_acquired[frame_index], VK_NULL_HANDLE, &image_index);
 
     switch (result) {
     case vk::Result::eSuccess:
-        break;
+        return true;
     case vk::Result::eSuboptimalKHR:
+        // SUBOPTIMAL still acquires an image and signals the binary semaphore. Present this
+        // image to consume that signal before replacing the swapchain on the next frame.
+        needs_recreation = true;
+        return true;
     case vk::Result::eErrorSurfaceLostKHR:
+        needs_surface_recreation = true;
+        [[fallthrough]];
     case vk::Result::eErrorOutOfDateKHR:
     case vk::Result::eErrorUnknown:
         needs_recreation = true;
+        break;
+    case vk::Result::eTimeout:
+    case vk::Result::eNotReady:
         break;
     default:
         LOG_CRITICAL(Render_Vulkan, "Swapchain acquire returned unknown result {}",
@@ -124,7 +170,7 @@ bool Swapchain::AcquireNextImage() {
         break;
     }
 
-    return !needs_recreation;
+    return false;
 }
 
 bool Swapchain::Present() {
@@ -137,8 +183,10 @@ bool Swapchain::Present() {
     };
 
     auto result = instance.GetPresentQueue().presentKHR(present_info);
-    if (result == vk::Result::eErrorOutOfDateKHR || result == vk::Result::eSuboptimalKHR) {
+    if (result == vk::Result::eErrorOutOfDateKHR || result == vk::Result::eSuboptimalKHR ||
+        result == vk::Result::eErrorSurfaceLostKHR || result == vk::Result::eErrorUnknown) {
         needs_recreation = true;
+        needs_surface_recreation |= result == vk::Result::eErrorSurfaceLostKHR;
     } else {
         ASSERT_MSG(result == vk::Result::eSuccess, "Swapchain presentation failed: {}",
                    vk::to_string(result));
@@ -220,9 +268,14 @@ void Swapchain::FindPresentMode() {
     }
 }
 
-void Swapchain::SetSurfaceProperties() {
+bool Swapchain::SetSurfaceProperties() {
     const auto [capabilities_result, capabilities] =
         instance.GetPhysicalDevice().getSurfaceCapabilitiesKHR(surface);
+    if (capabilities_result == vk::Result::eErrorSurfaceLostKHR ||
+        capabilities_result == vk::Result::eErrorOutOfDateKHR) {
+        needs_surface_recreation |= capabilities_result == vk::Result::eErrorSurfaceLostKHR;
+        return false;
+    }
     ASSERT_MSG(capabilities_result == vk::Result::eSuccess,
                "Failed to query surface capabilities: {}", vk::to_string(capabilities_result));
 
@@ -232,6 +285,9 @@ void Swapchain::SetSurfaceProperties() {
                                 std::min(capabilities.maxImageExtent.width, width));
         extent.height = std::max(capabilities.minImageExtent.height,
                                  std::min(capabilities.maxImageExtent.height, height));
+    }
+    if (extent.width == 0 || extent.height == 0) {
+        return false;
     }
 
     // Select number of images in swap chain, we prefer one buffer in the background to work on
@@ -251,6 +307,7 @@ void Swapchain::SetSurfaceProperties() {
     if (!(capabilities.supportedCompositeAlpha & vk::CompositeAlphaFlagBitsKHR::eOpaque)) {
         composite_alpha = vk::CompositeAlphaFlagBitsKHR::eInherit;
     }
+    return true;
 }
 
 void Swapchain::Destroy() {
@@ -268,7 +325,9 @@ void Swapchain::Destroy() {
 
     if (swapchain) {
         device.destroySwapchainKHR(swapchain);
+        swapchain = nullptr;
     }
+    images.clear();
 
     for (const auto& sem : image_acquired) {
         device.destroySemaphore(sem);

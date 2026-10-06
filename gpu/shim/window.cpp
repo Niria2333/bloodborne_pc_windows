@@ -120,6 +120,7 @@ WindowSDL::WindowSDL(s32 width_, s32 height_, const char* title) : width{width_}
     SDL_GetWindowSizeInPixels(window, &w, &h);
     width = w;
     height = h;
+    UpdatePresentationState();
     LOG_INFO(Frontend, "Window {}x{} on {}", w, h, driver);
 }
 
@@ -163,7 +164,21 @@ bool WindowSDL::PollEvents() {
             break;
         }
     }
+    // Query on the event thread after SDL applies focus/minimize/display changes. The renderer
+    // reads only this atomic snapshot; fullscreen Alt+Tab can leave a temporarily zero surface.
+    UpdatePresentationState();
     return is_open;
+}
+
+void WindowSDL::UpdatePresentationState() {
+    const SDL_WindowFlags flags = SDL_GetWindowFlags(window);
+    const bool available = IsOpen() &&
+        !(flags & (SDL_WINDOW_MINIMIZED | SDL_WINDOW_HIDDEN)) &&
+        (!(flags & SDL_WINDOW_FULLSCREEN) || (flags & SDL_WINDOW_INPUT_FOCUS)) &&
+        GetWidth() > 0 && GetHeight() > 0;
+    if (presentation_available.exchange(available, std::memory_order_acq_rel) != available) {
+        LOG_INFO(Frontend, "Window presentation {}", available ? "resumed" : "suspended");
+    }
 }
 
 } // namespace Frontend

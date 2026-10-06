@@ -14,7 +14,7 @@
 
 ## 自动与底层验证
 
-2026-10-06 帧时间修复后重新运行 `build_windows.ps1 -Test`，完整编译和 **16/16 项 CTest、110/110 项 Python 测试**通过，无跳过测试；另运行 **6/6 项 PresentMon 分析器测试**通过。开发机结果日志为 `out/windows-smooth60-validation.log`，该文件属于本地生成物，不随源码发布。110 项构建测试包括 82 项基础测试和 28 项修改器测试。
+2026-10-06 全屏 Alt+Tab 修复后重新运行 `build_windows.ps1 -Test`，完整编译和 **16/16 项 CTest、113/113 项 Python 测试**通过，无跳过测试。开发机结果日志为 `out/windows-alt-tab-validation-final.log`，该文件属于本地生成物，不随源码发布。113 项构建测试包括 85 项基础测试和 28 项修改器测试；新增三项验证隐藏的 console Python 工作进程、原生 stdout/stderr 和失败退出码。此前帧时间修复另运行的 **6/6 项 PresentMon 分析器测试**通过，分析器未因本次修复变化。
 
 | 验证 | 结果与范围 |
 | --- | --- |
@@ -22,9 +22,9 @@
 | 16 项 CTest | 线程/TLS、异常恢复、内存映射与别名、同步、系统服务、文件/存档、AppContent、音频周期、手柄映射、命名生命周期及 Vulkan 读回通过 |
 | Python 加载器/准备/模块 | probe 15、prepare 6、link_libc 9 项通过 |
 | Python 补丁/内容 | patches 11、content 5 项通过 |
-| Python 启动器/图形 | launcher 23、graphics 13 项通过；含基础模块共 82 项，覆盖平稳 60 帧组合、保存、重启及条件不满足时禁用 |
+| Python 启动器/图形 | launcher 26、graphics 13 项通过；含基础模块共 85 项，覆盖平稳 60 帧组合、保存、重启及条件不满足时禁用，以及原生日志和退出码 |
 | Python 修改器 | 后端 23、Tk 界面 4、真实 Windows 合成进程集成 1 项通过；合计 28 项 |
-| Python 帧时间分析器 | 另行运行 6 项通过；覆盖时间单位/区间、交换链筛选、显示时长与原生提交间隔，未包含在 `build_windows.ps1 -Test` 的 110 项中 |
+| Python 帧时间分析器 | 此前另行运行 6 项通过；覆盖时间单位/区间、交换链筛选、显示时长与原生提交间隔，未包含在 `build_windows.ps1 -Test` 的 113 项中 |
 | 独立手柄互换 | SDL 虚拟手柄经实际 libScePad 接口验证四种布局，每种覆盖 16 种面键组合；肩键、方向键、摇杆、扳机和捕获恢复通过 |
 | Vulkan 读回 | RTX 4070 Ti 命令提交及 4096 字节读回通过 |
 | Windows 输出 | 3840×2160 窗口/交换链初始化通过；该项是图形初始化，不是 4K 关卡性能测量 |
@@ -75,6 +75,16 @@ Windows 等待改用高精度 waitable timer，VideoOut 的帧提交与 tick dea
 2026-10-06 在相同 3840×2160 输出、FSR 4 v07 INT8 Balanced 和相同特效下，用官方 PresentMon 对显示帧时间做独立采样。普通固定 60 帧对照也已包含高精度计时修复。预热后静止区间的显示平均为 60.0037 FPS、p99 为 16.7612 ms、独立 1% Low 为 55.02 FPS；镜头运动区间显示平均约 60 FPS、p99 为 16.7617 ms、独立 1% Low 为 58.20 FPS。这些数值是最慢 1% 显示时长的平均值取倒数，NVIDIA 浮窗的公式和窗口未知，不能保证其 Low 显示相同数值。
 
 真实启动器另完成 120 秒短时运行和 20 秒显示模式检查；后者实测由 3840×2160@159.98 Hz 切换到 120 Hz，退出恢复 159.98 Hz。日志中的 `vblank 480 Hz, frame limit 60 FPS` 指内部调度 tick 与独立限帧，不是屏幕 480 Hz。原生 Present 调用采样用于核对最终启动器行为，不能替代显示帧时间。测量范围、公式、复测方法与局限见 [WINDOWS_FRAME_PACING.md](WINDOWS_FRAME_PACING.md)。
+
+### 全屏 Alt+Tab 恢复
+
+旧程序在上述 4K / FSR 4 / 平稳 60 帧配置下进入亚南中心后，实际按 Alt+Tab 可以复现退出。完整原生日志为 `RecreateFrame: Failed allocating texture with error ErrorInitializationFailed`、`STOP: GPU library assertion failed`，原生退出码 23。Win32 最小化时的零尺寸 surface 曾传入期望游戏图像尺寸，下一次分配 0×0 图像失败。旧 GUI 的 `pythonw.exe` 工作进程还会丢失原生子进程日志，把此失败显示为外层退出码 1。
+
+修复后在最小化/隐藏/全屏失焦期间跳过呈现并归还帧，继续处理游戏的 flip 完成事件；保留有效游戏图像尺寸，窗口恢复后才重建交换链。超时、过期和丢失 surface 走恢复路径；SUBOPTIMAL 仍消费已获取图像的 semaphore。重分配帧图像前同时等待该帧最近的准备 timeline，避免后台跳帧后调整尺寸时过早销毁 GPU 仍使用的图像。GUI 的隐藏 console Python 工作进程已用合成子进程验证 stdout/stderr 和原生失败码均保留。
+
+第一轮复制存档实机运行 300 秒，关卡内多次切出/返回，包括五次连续快速切换，观察到画面恢复且稳定区间回到约 60 FPS。最终打包程序另运行 180 秒，再次验证关卡内切出、后台停留和返回；两次均由预定 watchdog 结束，退出码 142 表示测试限时结束，未出现 GPU 断言。SDL 显示模式均为运行中 120 Hz、结束后恢复 3840×2160@159.98 Hz。此测试验证切换恢复，不是新的显示 1% Low 测量；切换期间的长帧不应算入稳定游戏性能区间。
+
+本机部署到 `dist/windows/bb-probe.exe` 的最终产物 SHA256 为 `3e47ba65dcc00a3b1bd5ae00d695367998ebb3543516e27a44282b1989fd1ac3`，与构建产物一致。证据保存在本地 `out/alt-tab-audit/`，测试始终使用复制存档，未向公开仓库提交存档、游戏数据或原始日志。跨显卡、切换 HDR、拔插显示器和长期稳定性不属于本次验证范围。
 
 ## Windows 修改器
 

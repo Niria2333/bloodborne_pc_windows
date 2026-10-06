@@ -4,9 +4,11 @@
 
 目前已实现原生 Windows 运行库、Vulkan 渲染器、中文启动器、开场黑屏与音频等待修复，以及全屏、垂直同步、独立 A/B 与 X/Y 互换和角色命名键盘。新增中文 [Windows 修改器](docs/WINDOWS_TRAINER.md)，支持生命/体力补满、指定血之回响和已有物品数量。CUSA03023 1.09 已进入实际关卡，用户确认可正常命名并进入游戏；1080p 着色器预热后观察到 60 FPS，首次着色器编译时仍有短暂掉帧。
 
-**本项目仍为实验版本。** 4K 为可选输出设置，持续 4K/60 FPS、完整通关和长期稳定性尚未验证。FSR 4 v07 INT8 的资源校验与独立 1080p 基准已通过；游戏内 FSR 4 和 FSR 4.1.1 Windows 适配仍需完成验证或实现。
+新增可选 **“平稳 60 帧（120 Hz 全屏）”**，修正 Windows 等待精度并改善 60 帧显示节奏。推荐选择 60 帧，同时勾选全屏、垂直同步和该选项。在 RTX 4070 Ti 上保留 4K、FSR 4 Balanced 的短时测试中，平均约 60 FPS，独立计算的显示 1% Low 约 55～58 FPS；详情见[测量方法与结果](docs/WINDOWS_FRAME_PACING.md)。
 
-**本次发布仅含源码，不含游戏本体、Sony 模块、存档或预编译安装包。** 需要自行准备已解密的 CUSA03173 或 CUSA03023、1.09 版游戏目录。2026-10-06 完整验证通过 16/16 CTest 和 107/107 Python 测试，含 28 项修改器测试；游戏内全部修改效果尚未逐一实测。
+**本项目仍为实验版本。** 加载和首次着色器编译仍会掉帧，持续全场景 4K/60 FPS、完整通关和长期稳定性尚未验证。FSR 4 v07 INT8 的资源校验、独立 1080p 基准及短时 4K 游戏实测已通过；FSR 4.1.1 Windows 适配仍未完成。
+
+**本次发布仅含源码，不含游戏本体、Sony 模块、存档或预编译安装包。** 需要自行准备已解密的 CUSA03173 或 CUSA03023、1.09 版游戏目录。2026-10-06 最新完整验证通过 16/16 CTest 和 110/110 Python 测试，含 23 项启动器和 28 项修改器测试；游戏内全部修改效果尚未逐一实测。
 
 阅读 [完整中文 README](README.zh-CN.md)、[Windows 构建与运行说明](docs/WINDOWS.md)、[移植总结](docs/WINDOWS_PORT_SUMMARY.md) 和 [验证记录](docs/WINDOWS_VALIDATION.md)。原始 Linux 文档保留在本页下方，其性能数字和 FSR 4.1.1 结果属于上游 Linux 环境。
 
@@ -18,7 +20,7 @@ Windows source: [yaonikaixin999999/bloodborne_pc_windows](https://github.com/yao
 
 This independent repository adds a native Windows x64 runtime, Vulkan renderer build, and Chinese launcher to [deadinside28/bloodborne_pc](https://github.com/deadinside28/bloodborne_pc). The original project's history, copyright notices and Linux documentation are retained below. Bloodborne's original x86-64 game code runs through a runtime written for this game; this is not a general PS4 emulator.
 
-**Status: experimental, early gameplay verified on one Windows 11 PC.** A CUSA03023 v1.09 dump reached the first playable area after character naming and Chinese menus. Warm-shader 1080p gameplay was observed at 60 FPS, with temporary drops during shader compilation. A full play-through and sustained 4K/60 FPS gameplay have not been verified.
+**Status: experimental, early gameplay verified on one Windows 11 PC.** A CUSA03023 v1.09 dump reached the first playable area after character naming and Chinese menus. Warm-shader 1080p gameplay was observed at 60 FPS. Short 4K FSR 4 Balanced captures on an RTX 4070 Ti averaged about 60 FPS with the optional smooth-60 mode; independently calculated display 1% lows were about 55–58 FPS. Loading and shader compilation still cause hitches. A full play-through and sustained 4K/60 FPS across all scenes have not been verified.
 
 The Windows additions include:
 
@@ -27,6 +29,9 @@ The Windows additions include:
 - A Chinese launcher with automatic/Chinese/English game language, fullscreen/windowed modes, VSync, independent A/B and X/Y swaps, and a controller-operated character-name keyboard. Preferences persist between runs, including local game-directory detection and paths that survive moving the local project folder.
 - A separate Chinese [Windows trainer](docs/WINDOWS_TRAINER.md) for health/stamina refill, Blood Echoes and existing item quantities. It validates the native process and game instructions, requires explicit activation, and restores instructions on normal disconnect. Hook locations and field semantics credit Shiningami's community cheat table. Item changes affect existing quantities; all in-game scenarios have not been verified.
 - Independent output resolution and graphics quality, FSR 3.1, optional FSR 4 v07 INT8, TAA, effects, and 30/60/90/display-paced frame-rate choices. 90 FPS and display-paced modes are experimental. **FSR 4.1.1 Windows adaptation is pending and cannot be selected in this launcher.**
+- High-resolution Windows waits and an optional smooth-60 mode combining dynamic game timing, a 60 FPS limit, 120 Hz fullscreen and two frames ahead. It restores the desktop mode on exit and preserves graphics settings.
+
+For a display supporting 120 Hz at its current resolution, select **60 FPS** and enable **fullscreen**, **VSync** and **平稳 60 帧（120 Hz 全屏）**. The new option starts disabled and is saved between runs. Unsupported 120 Hz modes retain the desktop refresh rate. This is a scheduling change, with no frame generation. See [frame pacing measurements](docs/WINDOWS_FRAME_PACING.md) for the capture method and limits; the numbers do not guarantee NVIDIA's overlay Low will equal 60.
 
 **This publication contains source code, not a prebuilt Windows release or game data.** Bring your own decrypted CUSA03173 or CUSA03023 v1.09 game directory. FSR 4 model/shader assets are downloaded separately by the included Windows tool; FSR 3.1 needs no model download.
 
@@ -39,7 +44,7 @@ python .\run_windows.py --gui
 python .\bloodborne_trainer.py --gui
 ```
 
-Install the prerequisites in the [Windows guide](docs/WINDOWS.md) first; it lists the MSYS2 dependencies, game-directory layout, and settings. Full validation on 2026-10-06: **16/16 CTest and 107/107 Python tests passed**, including 28 trainer tests. The native trainer integration test uses a synthetic Windows process without game data; it does not verify every in-game scenario or item.
+Install the prerequisites in the [Windows guide](docs/WINDOWS.md) first; it lists the MSYS2 dependencies, game-directory layout, and settings. Latest full validation on 2026-10-06: **16/16 CTest and 110/110 Python tests passed**, including 23 launcher and 28 trainer tests. The native trainer integration test uses a synthetic Windows process without game data; it does not verify every in-game scenario or item.
 
 This derivative retains the upstream **GPL-2.0-or-later** license ([LICENSE](LICENSE)). The renderer derives from shadPS4; FSR-Vulkan, AMD FidelityFX, Dear ImGui, LibAtrac9, and other dependencies retain their own notices. Credits below apply to this Windows project too. The project is not affiliated with Sony Interactive Entertainment, FromSoftware, or AMD.
 

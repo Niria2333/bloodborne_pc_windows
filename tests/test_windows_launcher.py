@@ -43,6 +43,7 @@ class WindowsLauncherTests(unittest.TestCase):
         inherited={'BB_UPSCALER':'off','BB_UPSCALE_PRESET':'4','BB_RENDER_RES':'640x360',
                    'BB_OUTPUT_RES':'1280x720','BB_FPS':'90','BB_VBLANK_HZ':'90',
                    'BB_LANGUAGE':'1','BB_FULLSCREEN':'0','BB_PAD_LAYOUT':'xbox','BB_PRESENT_MODE':'Mailbox',
+                   'BB_FULLSCREEN_REFRESH_HZ':'144',
                    'BB_FPS_LIMIT':'25','BB_JITTER':'0','BB_REACTIVE':'1','BB_OBJECT_MOTION':'0',
                    'BB_FSR_SHARPNESS':'2','BB_CONFIG':'old-config.ini'}
         with patch.dict(os.environ,inherited):
@@ -204,12 +205,13 @@ class WindowsLauncherTests(unittest.TestCase):
             root=Path(tmp); (root/'user').mkdir()
             preferences=root/'user/launcher.json'
             preferences.write_text(json.dumps({'resolution':[],'language':{},'fullscreen':'false',
-                                               'controller_layout':[],'vsync':'false'}))
+                                               'controller_layout':[],'vsync':'false','sync_refresh':'true'}))
             with patch.object(launcher,'ROOT',root):
                 self.assertEqual(launcher.read_preferences()['language'],'auto')
                 self.assertFalse(launcher.read_preferences()['fullscreen'])
                 self.assertEqual(launcher.read_preferences()['controller_layout'],'ps4')
                 self.assertFalse(launcher.read_preferences()['vsync'])
+                self.assertFalse(launcher.read_preferences()['sync_refresh'])
                 preferences.write_text('{invalid')
                 self.assertEqual(launcher.read_preferences()['resolution'],'1080p')
             for flag in ('--windowed','--no-fullscreen'):
@@ -219,12 +221,12 @@ class WindowsLauncherTests(unittest.TestCase):
                      patch.object(launcher,'launch') as launch:
                     self.assertEqual(launcher.main(),0)
                     launch.assert_called_once_with(root,None,False,language='zh-cn',fullscreen=False,
-                                                   controller_layout='xbox',fps=None,vsync=None)
+                                                   controller_layout='xbox',fps=None,vsync=None,sync_refresh=None)
             with patch.object(launcher.sys,'argv',['run_windows.py','--gui','--language','en','--fullscreen',
                                                  '--controller-layout','xbox']), \
                  patch.object(launcher,'gui') as gui:
                 self.assertEqual(launcher.main(),0)
-                gui.assert_called_once_with(None,None,'en',True,'xbox',None,None)
+                gui.assert_called_once_with(None,None,'en',True,'xbox',None,None,None)
 
     def test_legacy_launch_profile_is_restored_and_saved_choices_take_precedence(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -236,18 +238,18 @@ class WindowsLauncherTests(unittest.TestCase):
             with patch.object(launcher,'ROOT',root):
                 self.assertEqual(launcher.read_preferences(),{
                     'game_dir':str((root/'previous game').resolve()),'resolution':'4k-native',
-                    'language':'zh-tw','fullscreen':True,'controller_layout':'ps4','fps':'60','vsync':False})
+                    'language':'zh-tw','fullscreen':True,'controller_layout':'ps4','fps':'60','vsync':False,'sync_refresh':False})
                 launcher.save_preferences({'resolution':'1440p','language':'auto','fullscreen':False})
                 self.assertEqual(launcher.read_preferences(),{
                     'game_dir':str((root/'previous game').resolve()),'resolution':'1440p',
-                    'language':'auto','fullscreen':False,'controller_layout':'ps4','fps':'60','vsync':False})
+                    'language':'auto','fullscreen':False,'controller_layout':'ps4','fps':'60','vsync':False,'sync_refresh':False})
 
     def test_cli_display_flags_are_optional_and_mutually_exclusive(self):
         with patch.object(launcher.sys,'argv',['run_windows.py','--game','unused']), \
              patch.object(launcher,'launch') as launch:
             self.assertEqual(launcher.main(),0)
             launch.assert_called_once_with(Path('unused'),None,False,language=None,fullscreen=None,
-                                           controller_layout=None,fps=None,vsync=None)
+                                           controller_layout=None,fps=None,vsync=None,sync_refresh=None)
         with patch.object(launcher.sys,'argv',['run_windows.py','--gui','--fullscreen','--windowed']), \
              patch.object(launcher.sys,'stderr'),self.assertRaises(SystemExit) as error:
             launcher.main()
@@ -264,8 +266,103 @@ class WindowsLauncherTests(unittest.TestCase):
                  patch.object(launcher.sys,'argv',['run_windows.py','--gui',flag]), \
                  patch.object(launcher,'gui') as gui:
                 self.assertEqual(launcher.main(),0)
-                self.assertIs(gui.call_args.args[-1],enabled)
+                self.assertIs(gui.call_args.args[-2],enabled)
         with patch.object(launcher.sys,'argv',['run_windows.py','--gui','--vsync','--no-vsync']), \
+             patch.object(launcher.sys,'stderr'),self.assertRaises(SystemExit) as error:
+            launcher.main()
+        self.assertEqual(error.exception.code,2)
+
+    def test_sync_refresh_preferences_and_restart_preserve_the_choice(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp); game=game_fixture(root/'game')
+            executable=root/'dist/windows/bb-probe.exe'
+            executable.parent.mkdir(parents=True); executable.write_bytes(b'fixture')
+            with patch.object(launcher,'ROOT',root),patch.object(launcher,'execute') as execute, \
+                 patch.object(launcher.subprocess,'call',side_effect=[75,0,0]) as renderer:
+                self.assertFalse(launcher.read_preferences()['sync_refresh'])
+                launcher.launch(game,'1080p',fullscreen=True,vsync=True,sync_refresh=True)
+                self.assertTrue(launcher.read_preferences()['sync_refresh'])
+                self.assertEqual(launcher.read_preferences()['fps'],'60')
+                self.assertEqual(renderer.call_count,2)
+                for call in renderer.call_args_list:
+                    self.assertEqual(call.kwargs['env']['BB_FULLSCREEN_REFRESH_HZ'],'120')
+                    self.assertEqual(call.kwargs['env']['BB_FPS'],'uncap')
+                    self.assertEqual(call.kwargs['env']['BB_VBLANK_HZ'],'0')
+                    self.assertEqual(call.kwargs['env']['BB_FPS_LIMIT'],'60')
+                    self.assertEqual(call.kwargs['env']['BB_FRAMES_AHEAD'],'2')
+                patches=[call.args[0] for call in execute.call_args_list
+                         if str(call.args[0][1]).endswith('patches.py')]
+                self.assertEqual(len(patches),2)
+                for command in patches:
+                    self.assertEqual(command[command.index('--fps')+1],'uncap')
+                state=json.loads((root/'out/windows-data/launch.json').read_text(encoding='utf-8'))
+                self.assertTrue(state['sync_refresh'])
+                self.assertEqual(state['fullscreen_refresh_hz'],120)
+                self.assertEqual(state['fps'],'60')
+                self.assertEqual(state['patch_fps'],'uncap')
+                self.assertEqual(state['target_fps'],60)
+                launcher.launch(game,prepare_only=True)
+                self.assertTrue(launcher.read_preferences()['sync_refresh'])
+                self.assertEqual(execute.call_args.args[1]['BB_FULLSCREEN_REFRESH_HZ'],'120')
+                launcher.launch(game,prepare_only=True,sync_refresh=False)
+                self.assertFalse(launcher.read_preferences()['sync_refresh'])
+                self.assertNotIn('BB_FULLSCREEN_REFRESH_HZ',execute.call_args.args[1])
+                self.assertNotIn('BB_FPS_LIMIT',execute.call_args.args[1])
+                self.assertEqual(execute.call_args.args[1]['BB_FPS'],'60')
+                self.assertEqual(execute.call_args.args[1]['BB_VBLANK_HZ'],'60')
+                state=json.loads((root/'out/windows-data/launch.json').read_text(encoding='utf-8'))
+                self.assertFalse(state['sync_refresh'])
+                self.assertIsNone(state['fullscreen_refresh_hz'])
+                self.assertEqual(state['patch_fps'],'60')
+                launcher.launch(game)
+                self.assertEqual(renderer.call_args.kwargs['env']['BB_FRAMES_AHEAD'],'1')
+
+    def test_sync_refresh_only_applies_to_fullscreen_vsync_60_fps(self):
+        choices=[('60',True,True,True,120),('60',True,True,False,None),
+                 ('30',True,True,True,None),('90',True,True,True,None),
+                 ('uncap',True,True,True,None),('60',False,True,True,None),
+                 ('60',True,False,True,None)]
+        for fps,fullscreen,vsync,sync_refresh,refresh in choices:
+            with self.subTest(fps=fps,fullscreen=fullscreen,vsync=vsync,sync_refresh=sync_refresh), \
+                 tempfile.TemporaryDirectory() as tmp:
+                root=Path(tmp); game=game_fixture(root/'game')
+                with patch.object(launcher,'ROOT',root),patch.object(launcher,'execute') as execute, \
+                     patch.dict(os.environ,{'BB_FULLSCREEN_REFRESH_HZ':'144'}):
+                    launcher.launch(game,'1080p',prepare_only=True,fps=fps,fullscreen=fullscreen,
+                                    vsync=vsync,sync_refresh=sync_refresh)
+                    patch_fps='uncap' if refresh else fps
+                    for call in execute.call_args_list:
+                        self.assertEqual(call.args[1]['BB_FPS'],patch_fps)
+                        self.assertEqual(call.args[1]['BB_VBLANK_HZ'],
+                                         '0' if patch_fps=='uncap' else '90' if patch_fps=='90' else '60')
+                        if refresh:
+                            self.assertEqual(call.args[1]['BB_FULLSCREEN_REFRESH_HZ'],str(refresh))
+                            self.assertEqual(call.args[1]['BB_FPS_LIMIT'],'60')
+                        else:
+                            self.assertNotIn('BB_FULLSCREEN_REFRESH_HZ',call.args[1])
+                            self.assertNotIn('BB_FPS_LIMIT',call.args[1])
+                    command=execute.call_args.args[0]
+                    self.assertEqual(command[command.index('--fps')+1],patch_fps)
+                    state=json.loads((root/'out/windows-data/launch.json').read_text(encoding='utf-8'))
+                    self.assertIs(state['sync_refresh'],sync_refresh)
+                    self.assertEqual(state['fullscreen_refresh_hz'],refresh)
+                    self.assertEqual(state['fps'],fps)
+                    self.assertEqual(state['patch_fps'],patch_fps)
+                    self.assertEqual(state['target_fps'],int(fps) if fps!='uncap' else 'display')
+
+    def test_cli_sync_refresh_flags_forward_and_are_mutually_exclusive(self):
+        for flag,enabled in (('--sync-refresh',True),('--no-sync-refresh',False)):
+            with self.subTest(flag=flag), \
+                 patch.object(launcher.sys,'argv',['run_windows.py','--game','unused',flag]), \
+                 patch.object(launcher,'launch') as launch:
+                self.assertEqual(launcher.main(),0)
+                self.assertIs(launch.call_args.kwargs['sync_refresh'],enabled)
+            with self.subTest(gui=flag), \
+                 patch.object(launcher.sys,'argv',['run_windows.py','--gui',flag]), \
+                 patch.object(launcher,'gui') as gui:
+                self.assertEqual(launcher.main(),0)
+                self.assertIs(gui.call_args.args[-1],enabled)
+        with patch.object(launcher.sys,'argv',['run_windows.py','--gui','--sync-refresh','--no-sync-refresh']), \
              patch.object(launcher.sys,'stderr'),self.assertRaises(SystemExit) as error:
             launcher.main()
         self.assertEqual(error.exception.code,2)

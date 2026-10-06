@@ -2,7 +2,7 @@
 
 本项目以独立 GitHub 仓库发布，源码基于 [deadinside28/bloodborne_pc](https://github.com/deadinside28/bloodborne_pc)，保留原作者版权、上游提交历史和许可证，增加原生 Windows x64 运行库、Vulkan 渲染器构建和中文启动器。游戏进程无需 WSL。当前发布仅提供源码，没有预编译安装包或游戏数据。
 
-已在一台 Windows 11 电脑上用 CUSA03023 1.09 进入实际关卡，1080p 预热后观察到 60 FPS。首次着色器编译会掉帧；4K 持续 60 FPS、完整通关和长期稳定性尚未验证。详细记录见 [WINDOWS_VALIDATION.md](WINDOWS_VALIDATION.md)。
+已在一台 Windows 11 电脑上用 CUSA03023 1.09 进入实际关卡，1080p 预热后观察到 60 FPS。RTX 4070 Ti 上短时 4K、FSR 4 Balanced 测量中，平稳 60 帧模式平均约 60 FPS，独立显示 1% Low 约 55～58 FPS。首次着色器编译和加载仍会掉帧，完整通关与长期稳定性尚未验证。详细记录见 [WINDOWS_VALIDATION.md](WINDOWS_VALIDATION.md) 和[帧时间测量](WINDOWS_FRAME_PACING.md)。
 
 ## 环境要求
 
@@ -74,9 +74,13 @@ python .\run_windows.py --gui
 
 也可以双击源码根目录的 `start_windows.cmd`。在“启动”页选择游戏目录、输出分辨率、60 帧、语言及窗口/全屏；“画面设置”页调整超分和特效。首次建议使用 1080p、FSR 3.1，进入关卡后再提高负载。首次启动会生成加载镜像、链接游戏自带模块并应用补丁。
 
-游戏语言支持 `auto/zh-cn/zh-tw/en`。自动模式优先检测 `dvdroot_ps4/msg/zhocn` 简体资源，再检测 `zhotw` 繁体资源，最后英语；明确选择中文但资源缺失时会报错。全屏勾选框使用无边框全屏。
+游戏语言支持 `auto/zh-cn/zh-tw/en`。自动模式优先检测 `dvdroot_ps4/msg/zhocn` 简体资源，再检测 `zhotw` 繁体资源，最后英语；明确选择中文但资源缺失时会报错。普通全屏使用桌面无边框模式；平稳 60 帧选项可切换为同分辨率的 120 Hz 全屏显示模式。
 
 “全屏运行”旁的“垂直同步”勾选框控制显示器同步，保存后在下次启动游戏时生效，独立于游戏帧率选择。勾选使用 FIFO，取消使用 Immediate；如果显卡不支持 Immediate，渲染器会回退到 FIFO。命令行可用 `--vsync` / `--no-vsync`，省略时沿用已保存选择；首次默认关闭。
+
+支持 120 Hz 的显示器建议选择 **60 帧**，并勾选 **全屏运行、垂直同步、平稳 60 帧（120 Hz 全屏）**。新选项首次默认关闭、保存后下次启动生效，只有 60 帧、全屏和垂直同步同时成立时才启用。它使用动态游戏时序补丁，再单独限制为 60 FPS，并使用两帧队列；游戏仍以 60 帧运行，120 Hz 指显示器刷新率。在 120 Hz 下，每个游戏帧可保持两次刷新，减少 160 Hz 桌面下 60 帧不均匀的显示间隔。
+
+该选项只请求当前桌面分辨率的 120 Hz 模式；不存在兼容模式时保留桌面刷新率，60 FPS 限制继续生效。退出后恢复桌面模式；本机已验证 3840×2160@159.98 → 120 → 159.98 Hz。取消勾选即可使用原来的固定 60 帧方案。CLI 使用 `--sync-refresh` / `--no-sync-refresh`，省略时沿用保存选择；30/90/`uncap` 档位不启用此组合。更多结果、局限及回退方式见 [WINDOWS_FRAME_PACING.md](WINDOWS_FRAME_PACING.md)。
 
 启动器提供独立的“A/B 互换”和“X/Y 互换”勾选框，可只换一组或同时换两组。选择保存后在下次启动游戏时生效，下方显示当前对应关系。旧 Xbox 方案会恢复为两项都勾选。
 
@@ -92,6 +96,7 @@ python .\run_windows.py --gui
 ```powershell
 python .\run_windows.py --game "C:\Games\CUSA03023" --resolution 1080p --fps 60 --language zh-cn --controller-layout xbox --windowed
 python .\run_windows.py --game "C:\Games\CUSA03023" --resolution 4k --fullscreen
+python .\run_windows.py --game "C:\Games\CUSA03023" --fps 60 --fullscreen --vsync --sync-refresh
 python .\run_windows.py --game "C:\Games\CUSA03023" --check
 python .\run_windows.py --game "C:\Games\CUSA03023" --prepare-only
 ```
@@ -114,7 +119,7 @@ FSR 3.1 与 FSR 4 的 Quality/Balanced 等预设以较低场景分辨率重建�
 
 可选 FSR 3.1、FSR 4 v07 INT8、TAA 或关闭超分。**FSR 4.1.1 Windows 适配尚未完成，启动器禁止新选。** FSR 4 还需模型资源及 GPU 必需特性；独立基准通过不代表游戏内各预设已经验证。没有新增 DLSS 或帧生成实现。
 
-帧率选项为 `--fps 30|60|90|uncap`。30/60 使用 60 Hz vblank，90 使用 90 Hz；`uncap` 使用显示器节奏（当前上游实现最高 120 帧）。90 和 `uncap` 标记为实验功能，目前仅验证参数/补丁一致性。60 帧目标对应约 16.7 ms 每帧，补丁不能保证每个场景均达到目标。
+帧率选项为 `--fps 30|60|90|uncap`。普通 30/60 使用 60 Hz vblank，90 使用 90 Hz；`uncap` 使用动态游戏时序和显示器节奏（当前上游实现最高 120 帧）。平稳 60 帧选项在内部使用 `uncap` 动态时序，但限制实际提交为 60 FPS；`launch.json` 分别记录用户选择的 `fps=60`、`patch_fps=uncap` 和 `target_fps=60`。运行日志中的 `vblank 480 Hz` 是内部调度频率，显示器为 120 Hz、游戏为 60 帧。90 和直接选择 `uncap` 仍为实验功能；60 帧目标约为 16.7 ms，每个场景的负载与加载仍会影响 Low。
 
 画面设置还包括锐化、运动向量、响应遮罩、景深、运动模糊、SSAO、动态阴影、SSR、模型 LOD、显示帧率和跳过开场。进入游戏后可用 **Insert** 或 **L3+R3** 打开移植设置菜单；部分分辨率/预设变化需“应用并重启”，启动器会接收重启请求并保留选择。
 
@@ -139,7 +144,7 @@ FSR 4.1.1 上游捕获工具需要 Proton。本分支尚未完成原生 Windows 
 | 路径 | 用途 |
 | --- | --- |
 | `bbport.ini` | 图形与游戏效果设置 |
-| `user/launcher.json` | 游戏路径、语言、帧率、窗口和手柄选择 |
+| `user/launcher.json` | 游戏路径、语言、帧率、窗口、同步/平稳 60 帧和手柄选择 |
 | `user/` | 存档、缓存和运行日志 |
 | `out/windows-data/` | 从游戏生成的镜像、补丁和准备报告 |
 | `out/windows-data/last-run.log` | GUI 启动日志 |
@@ -164,3 +169,5 @@ python .\scripts\package_windows.py --prefix "C:\msys64\ucrt64"
 报告运行错误时附上显卡/驱动、当前输出和超分设置、场景、是否可复现及相关日志。发布日志前移除个人路径；不要附游戏文件或生成镜像。
 
 Windows 稀疏共享内存使用 `SEC_RESERVE`，已提交页的内存承诺保留到进程退出，释放/复用时清零。长时间内存峰值和高负载 4K 表现仍需实测。测试通过、窗口初始化通过和低负载菜单 60 FPS 都不能代替关卡及长期运行验证。
+
+平均显示 60 帧但手感不平稳时，先检查帧时间和显示刷新率。已经开启垂直同步也可能有不均匀帧间隔；本机的高精度等待和 120 Hz 平稳 60 帧方案改善了这种情况。NVIDIA 浮窗的 Low 公式/时间窗可能不同于独立采样，不能用单个数字替代场景测试。加载和首次着色器编译造成的长帧不会因锁 60 自动消失。

@@ -25,6 +25,8 @@
 #include <chrono>
 #include <cmath>
 #include <csetjmp>
+#include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <ctime>
 #include <filesystem>
@@ -39,6 +41,60 @@
 #include <vk_mem_alloc.h>
 
 namespace Vulkan {
+
+namespace {
+
+struct PresentTimingLog {
+    using Clock = std::chrono::steady_clock;
+    FILE* file = nullptr;
+    Clock::time_point session_start{}, last_present{}, last_flush{};
+
+    PresentTimingLog() {
+        const char* path = std::getenv("BB_PRESENT_TIMES");
+        if (!path || !path[0]) {
+            return;
+        }
+        file = std::fopen(path, "w");
+        if (!file) {
+            std::fprintf(stderr, "Present timing: cannot open %s\n", path);
+            return;
+        }
+        session_start = last_flush = Clock::now();
+        std::fputs("session_elapsed_ms,present_start_monotonic_ms,interval_ms,is_game_frame,"
+                   "is_reusing_frame,acquire_ms,flush_ms,submit_mutex_wait_ms,present_call_ms\n",
+                   file);
+        std::fflush(file);
+    }
+
+    ~PresentTimingLog() {
+        if (file) {
+            std::fclose(file);
+        }
+    }
+
+    static double Milliseconds(Clock::duration duration) {
+        return std::chrono::duration<double, std::milli>(duration).count();
+    }
+
+    void Record(Clock::time_point present_start, Clock::time_point present_end,
+                bool game, bool reused, Clock::duration acquire, Clock::duration flush,
+                Clock::duration mutex_wait) {
+        const double interval = last_present == Clock::time_point{}
+                                    ? 0.0 : Milliseconds(present_start - last_present);
+        std::fprintf(file, "%.6f,%.6f,%.6f,%d,%d,%.6f,%.6f,%.6f,%.6f\n",
+                     Milliseconds(present_start - session_start),
+                     Milliseconds(present_start.time_since_epoch()), interval, game, reused,
+                     Milliseconds(acquire), Milliseconds(flush), Milliseconds(mutex_wait),
+                     Milliseconds(present_end - present_start));
+        last_present = present_start;
+        if (present_end - last_flush >= std::chrono::seconds(5)) {
+            std::fflush(file);
+            last_flush = present_end;
+        }
+    }
+};
+
+} // namespace
 
 bool CanBlitToSwapchain(const vk::PhysicalDevice physical_device, vk::Format format) {
     const vk::FormatProperties props{physical_device.getFormatProperties(format)};
@@ -507,6 +563,13 @@ Frame* Presenter::PrepareBlankFrame(bool present_thread) {
 }
 
 void Presenter::Present(Frame* frame, bool is_reusing_frame, bool is_game_frame) {
+    // Optional host-call timings distinguish queued guest flips from presentation stalls.
+    static PresentTimingLog timing;
+    const bool trace_present = timing.file != nullptr;
+    using TimingClock = PresentTimingLog::Clock;
+    TimingClock::time_point acquire_end{}, flush_start{}, flush_end{}, mutex_wait_start{},
+        present_start{}, present_end{};
+
     // Free the frame for reuse
     const auto free_frame = [&] {
         if (!is_reusing_frame) {
@@ -522,6 +585,7 @@ void Presenter::Present(Frame* frame, bool is_reusing_frame, bool is_game_frame)
         swapchain.Recreate(window.GetWidth(), window.GetHeight());
     }
 
+    const auto acquire_start = trace_present ? TimingClock::now() : TimingClock::time_point{};
     if (!swapchain.AcquireNextImage()) {
         swapchain.Recreate(window.GetWidth(), window.GetHeight());
         if (!swapchain.AcquireNextImage()) {
@@ -530,6 +594,9 @@ void Presenter::Present(Frame* frame, bool is_reusing_frame, bool is_game_frame)
             free_frame();
             return;
         }
+    }
+    if (trace_present) {
+        acquire_end = TimingClock::now();
     }
 
     // Reset fence for queue submission. Do it here instead of GetRenderFrame() because we may
@@ -655,14 +722,33 @@ void Presenter::Present(Frame* frame, bool is_reusing_frame, bool is_game_frame)
     info.AddWait(frame->ready_semaphore, frame->ready_tick);
     info.AddSignal(swapchain.GetPresentReadySemaphore());
     info.AddSignal(frame->present_done);
+    if (trace_present) {
+        flush_start = TimingClock::now();
+    }
     scheduler.Flush(info);
+    if (trace_present) {
+        flush_end = TimingClock::now();
+        mutex_wait_start = flush_end;
+    }
 
     // Present to swapchain.
     {
         std::scoped_lock submit_lock{Scheduler::submit_mutex};
-        if (!swapchain.Present()) {
+        if (trace_present) {
+            present_start = TimingClock::now();
+        }
+        const bool presented = swapchain.Present();
+        if (trace_present) {
+            present_end = TimingClock::now();
+        }
+        if (!presented) {
             swapchain.Recreate(window.GetWidth(), window.GetHeight());
         }
+    }
+    if (trace_present) {
+        timing.Record(present_start, present_end, is_game_frame, is_reusing_frame,
+                      acquire_end - acquire_start, flush_end - flush_start,
+                      present_start - mutex_wait_start);
     }
 
     free_frame();

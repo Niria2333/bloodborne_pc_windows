@@ -3,6 +3,7 @@
 // SPDX-FileCopyrightText: Copyright 2026 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <algorithm>
 #include <ctime>
 #include <string>
 #include <thread>
@@ -111,13 +112,35 @@ bool AccurateSleep(const std::chrono::nanoseconds duration, std::chrono::nanosec
                    const bool interruptible) {
     const auto begin_sleep = std::chrono::high_resolution_clock::now();
 
+    if (duration <= std::chrono::nanoseconds::zero()) {
+        if (remaining) {
+            *remaining = std::chrono::nanoseconds::zero();
+        }
+        return true;
+    }
+
     LARGE_INTEGER interval{
-        .QuadPart = -1 * (duration.count() / 100u),
+        .QuadPart = -std::max<std::chrono::nanoseconds::rep>(1, duration.count() / 100u),
     };
-    HANDLE timer = ::CreateWaitableTimer(NULL, TRUE, NULL);
-    SetWaitableTimer(timer, &interval, 0, NULL, NULL, 0);
-    const auto ret = WaitForSingleObjectEx(timer, INFINITE, interruptible);
-    ::CloseHandle(timer);
+    // Ordinary waitable timers are coalesced to the system timer tick (often
+    // about 15.6 ms). At a 60 Hz target that can turn one 16.67 ms wait into
+    // roughly 31 ms, producing a catch-up burst in the pacing loop.
+    // Windows 10 1803+ supports a high-resolution waitable timer; retain the
+    // ordinary timer as a compatibility fallback for older systems/Wine.
+    constexpr DWORD high_resolution_timer = 0x00000002;
+    HANDLE timer = ::CreateWaitableTimerExW(nullptr, nullptr, high_resolution_timer,
+                                             TIMER_MODIFY_STATE | SYNCHRONIZE);
+    if (!timer) {
+        timer = ::CreateWaitableTimerW(nullptr, TRUE, nullptr);
+    }
+
+    DWORD ret = WAIT_FAILED;
+    if (timer) {
+        if (::SetWaitableTimer(timer, &interval, 0, nullptr, nullptr, FALSE)) {
+            ret = ::WaitForSingleObjectEx(timer, INFINITE, interruptible);
+        }
+        ::CloseHandle(timer);
+    }
 
     if (remaining) {
         const auto end_sleep = std::chrono::high_resolution_clock::now();

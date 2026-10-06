@@ -37,7 +37,7 @@ FPS_CHOICES=tuple(FPS_LABELS.values())
 
 def read_preferences():
     preferences={'game_dir':'','resolution':'1080p','language':'auto','fullscreen':False,
-                 'controller_layout':'ps4','fps':'60','vsync':False}
+                 'controller_layout':'ps4','fps':'60','vsync':False,'sync_refresh':False}
     # Older launchers only saved launch.json. Recover the last profile on upgrade,
     # then prefer choices saved by the current launcher's window or command line.
     for path in (ROOT/'out/windows-data/launch.json',ROOT/'user/launcher.json'):
@@ -53,6 +53,7 @@ def read_preferences():
             preferences['language']=saved['language']
         if isinstance(saved.get('fullscreen'),bool): preferences['fullscreen']=saved['fullscreen']
         if isinstance(saved.get('vsync'),bool): preferences['vsync']=saved['vsync']
+        if isinstance(saved.get('sync_refresh'),bool): preferences['sync_refresh']=saved['sync_refresh']
         if isinstance(saved.get('controller_layout'),str) and saved['controller_layout'] in CONTROLLER_LAYOUTS:
             preferences['controller_layout']=saved['controller_layout']
         if isinstance(saved.get('fps'),str) and saved['fps'] in FPS_CHOICES:
@@ -121,7 +122,7 @@ def runtime_environment():
     env['PATH']=os.pathsep.join(str(p) for p in candidates if p.is_dir())+os.pathsep+env.get('PATH','')
     # The launcher configuration also drives the offline resolution patches.
     for key in ('BB_UPSCALER','BB_UPSCALE_PRESET','BB_RENDER_RES','BB_OUTPUT_RES',
-                'BB_DMEM_MB','BB_LIVE_RES','BB_FPS','BB_FPS_LIMIT','BB_VBLANK_HZ','BB_LANGUAGE','BB_FULLSCREEN','BB_PAD_LAYOUT','BB_PRESENT_MODE',
+                'BB_DMEM_MB','BB_LIVE_RES','BB_FPS','BB_FPS_LIMIT','BB_VBLANK_HZ','BB_LANGUAGE','BB_FULLSCREEN','BB_FULLSCREEN_REFRESH_HZ','BB_PAD_LAYOUT','BB_PRESENT_MODE',
                 'BB_CONFIG','BB_FSR_SHARPNESS','BB_JITTER','BB_REACTIVE','BB_REACTIVE_SCALE',
                 'BB_REACTIVE_THRESHOLD','BB_REACTIVE_MAX','BB_OBJECT_MOTION','BB_FSR4_DIR','BB_FSR4_OPT'):
         env.pop(key,None)
@@ -135,7 +136,7 @@ def renderer_path():
 def execute(command,env):
     subprocess.run([str(v) for v in command],cwd=ROOT,env=env,check=True)
 
-def launch(game,resolution=None,prepare_only=False,*,language=None,fullscreen=None,controller_layout=None,fps=None,vsync=None):
+def launch(game,resolution=None,prepare_only=False,*,language=None,fullscreen=None,controller_layout=None,fps=None,vsync=None,sync_refresh=None):
     game=validate_game(game)
     preferences=read_preferences()
     language=preferences['language'] if language is None else language
@@ -143,6 +144,7 @@ def launch(game,resolution=None,prepare_only=False,*,language=None,fullscreen=No
     controller_layout=preferences['controller_layout'] if controller_layout is None else controller_layout
     fps=preferences['fps'] if fps is None else fps
     vsync=preferences['vsync'] if vsync is None else vsync
+    sync_refresh=preferences['sync_refresh'] if sync_refresh is None else sync_refresh
     if fps not in FPS_CHOICES:
         raise ValueError(f'不支持的帧率选项：{fps}')
     if controller_layout not in CONTROLLER_LAYOUTS:
@@ -158,20 +160,26 @@ def launch(game,resolution=None,prepare_only=False,*,language=None,fullscreen=No
     elif config.is_file(): settings=load_settings(config)
     else: settings=write_profile(config,preferences['resolution'])
     preferences.update(game_dir=str(game),resolution=resolution or preferences['resolution'],
-                       language=language,fullscreen=fullscreen,controller_layout=controller_layout,fps=fps,vsync=vsync)
+                       language=language,fullscreen=fullscreen,controller_layout=controller_layout,fps=fps,vsync=vsync,
+                       sync_refresh=sync_refresh)
     save_preferences(preferences)
     env=runtime_environment()
+    smooth_60=sync_refresh and fps=='60' and fullscreen and vsync
+    patch_fps='uncap' if smooth_60 else fps
     env.update(BB_LANGUAGE=str(language_id),BB_FULLSCREEN='1' if fullscreen else '0',
-               BB_PAD_LAYOUT=controller_layout,BB_CONFIG=str(config),BB_FPS=fps,
+               BB_PAD_LAYOUT=controller_layout,BB_CONFIG=str(config),BB_FPS=patch_fps,
                BB_PRESENT_MODE='Fifo' if vsync else 'Immediate',
                BB_FSR4_DIR=str(ROOT/'fsr4_shaders'),BB_FSR4_OPT='1',
-               BB_VBLANK_HZ='0' if fps=='uncap' else '90' if fps=='90' else '60')
+               BB_VBLANK_HZ='0' if patch_fps=='uncap' else '90' if patch_fps=='90' else '60')
+    fullscreen_refresh_hz=120 if smooth_60 else None
+    if smooth_60:
+        env.update(BB_FPS_LIMIT='60',BB_FULLSCREEN_REFRESH_HZ=str(fullscreen_refresh_hz))
     for script in ('prepare.py','link_libc.py','link_modules.py','content_profile.py'):
         command=[sys.executable,ROOT/'scripts'/script,game,'--out',data]
         if script in ('link_libc.py','link_modules.py'): command+=['--target','windows']
         execute(command,env)
     sizes=scaled_sizes(settings)
-    patch=[sys.executable,ROOT/'scripts/patches.py','--out',data,'--fps',fps,
+    patch=[sys.executable,ROOT/'scripts/patches.py','--out',data,'--fps',patch_fps,
            '--settings',config,'--game-dir',game]
     if sizes:
         render,output=sizes
@@ -185,13 +193,14 @@ def launch(game,resolution=None,prepare_only=False,*,language=None,fullscreen=No
     saved=ROOT/'user'
     saved.mkdir(exist_ok=True)
     state={'game_dir':str(game),'resolution':preferences['resolution'],
-           'fps':fps,'target_fps':int(fps) if fps!='uncap' else 'display',
+           'fps':fps,'patch_fps':patch_fps,'target_fps':int(fps) if fps!='uncap' else 'display',
            'output_res':settings.get('output_res'),'upscaler':settings.get('upscaler','fsr3'),
            'language':language,'resolved_language':resolved_language,'language_id':language_id,
-           'fullscreen':fullscreen,'controller_layout':controller_layout,'vsync':vsync,'gameplay_verified':False}
+           'fullscreen':fullscreen,'controller_layout':controller_layout,'vsync':vsync,
+           'sync_refresh':sync_refresh,'fullscreen_refresh_hz':fullscreen_refresh_hz,'gameplay_verified':False}
     (data/'launch.json').write_text(json.dumps(state,ensure_ascii=False,indent=2),encoding='utf-8')
     if prepare_only: return
-    env.update(BB_FRAME_STATS='1',BB_FRAMES_AHEAD='1',BB_LIVE_RES='0')
+    env.update(BB_FRAME_STATS='1',BB_FRAMES_AHEAD='2' if smooth_60 else '1',BB_LIVE_RES='0')
     args=[executable,data/'boot-linked.bin','--content-profile',data/'content.bin',
           '--patches',data/'patches.bin','--app0',game,'--user',saved,'--timeout','0']
     # Restart requests exit with 75: let the old GPU process fully release its device first.
@@ -200,9 +209,10 @@ def launch(game,resolution=None,prepare_only=False,*,language=None,fullscreen=No
         if code!=75:
             if code: raise subprocess.CalledProcessError(code,args)
             break
-        return launch(game,resolution=None,language=language,fullscreen=fullscreen,controller_layout=controller_layout,fps=fps,vsync=vsync)
+        return launch(game,resolution=None,language=language,fullscreen=fullscreen,controller_layout=controller_layout,fps=fps,
+                      vsync=vsync,sync_refresh=sync_refresh)
 
-def gui(game_dir=None,resolution=None,language=None,fullscreen=None,controller_layout=None,fps=None,vsync=None):
+def gui(game_dir=None,resolution=None,language=None,fullscreen=None,controller_layout=None,fps=None,vsync=None,sync_refresh=None):
     import tkinter as tk
     from tkinter import filedialog,messagebox,ttk
     root=tk.Tk()
@@ -251,6 +261,8 @@ def gui(game_dir=None,resolution=None,language=None,fullscreen=None,controller_l
     ttk.Checkbutton(options,text='全屏运行',variable=chosen_fullscreen).pack(side='left',padx=(20,0))
     chosen_vsync=tk.BooleanVar(value=preferences['vsync'] if vsync is None else vsync)
     ttk.Checkbutton(options,text='垂直同步',variable=chosen_vsync).pack(side='left',padx=(20,0))
+    chosen_sync_refresh=tk.BooleanVar(value=preferences['sync_refresh'] if sync_refresh is None else sync_refresh)
+    ttk.Checkbutton(frame,text='平稳 60 帧（120 Hz 全屏）',variable=chosen_sync_refresh).pack(anchor='w',pady=(0,12))
     controller_options=ttk.Frame(frame); controller_options.pack(fill='x',pady=(0,8))
     ttk.Label(controller_options,text='手柄按键：').pack(side='left')
     layout=preferences['controller_layout'] if controller_layout is None else controller_layout
@@ -279,7 +291,7 @@ def gui(game_dir=None,resolution=None,language=None,fullscreen=None,controller_l
         preferences.update(game_dir=game.get(),resolution=profile,
                            language=LANGUAGE_LABELS[chosen_language.get()],fullscreen=chosen_fullscreen.get(),
                            controller_layout=chosen_controller_layout(),fps=FPS_LABELS[chosen_fps.get()],
-                           vsync=chosen_vsync.get())
+                           vsync=chosen_vsync.get(),sync_refresh=chosen_sync_refresh.get())
         graphics.values() # validate every field before saving any changes
         changes=graphics.changes()
         if changes: save_settings(ROOT/'bbport.ini',changes)
@@ -323,6 +335,7 @@ def gui(game_dir=None,resolution=None,language=None,fullscreen=None,controller_l
                               '--fps',FPS_LABELS[chosen_fps.get()],
                               '--controller-layout',chosen_controller_layout(),
                               '--vsync' if chosen_vsync.get() else '--no-vsync',
+                              '--sync-refresh' if chosen_sync_refresh.get() else '--no-sync-refresh',
                               '--fullscreen' if chosen_fullscreen.get() else '--windowed'],cwd=ROOT,env=child_env,
                               stdout=log_handle,stderr=subprocess.STDOUT,
                               creationflags=getattr(subprocess,'CREATE_NO_WINDOW',0))
@@ -355,11 +368,16 @@ def main():
                       help='开启垂直同步；省略时沿用已保存的设置。')
     sync.add_argument('--no-vsync',dest='vsync',action='store_false',
                       help='关闭垂直同步；省略时沿用已保存的设置。')
+    refresh=parser.add_mutually_exclusive_group()
+    refresh.add_argument('--sync-refresh',dest='sync_refresh',action='store_true',default=None,
+                         help='60 帧、全屏且开启垂直同步时使用动态时序、60 帧限制和 120 Hz；省略时沿用已保存的设置。')
+    refresh.add_argument('--no-sync-refresh',dest='sync_refresh',action='store_false',
+                         help='沿用显示器当前刷新率；省略时沿用已保存的设置。')
     parser.add_argument('--prepare-only',action='store_true')
     parser.add_argument('--gui',action='store_true')
     parser.add_argument('--check',action='store_true')
     args=parser.parse_args()
-    if args.gui: gui(args.game,args.resolution,args.language,args.fullscreen,args.controller_layout,args.fps,args.vsync); return 0
+    if args.gui: gui(args.game,args.resolution,args.language,args.fullscreen,args.controller_layout,args.fps,args.vsync,args.sync_refresh); return 0
     if args.game is None:
         saved_game=read_preferences()['game_dir']
         if saved_game: args.game=Path(saved_game)
@@ -373,7 +391,7 @@ def main():
         return 0
     if not args.game: parser.error('请指定 --game 游戏目录，或使用 --gui。')
     launch(args.game,args.resolution,args.prepare_only,language=args.language,fullscreen=args.fullscreen,
-           controller_layout=args.controller_layout,fps=args.fps,vsync=args.vsync)
+           controller_layout=args.controller_layout,fps=args.fps,vsync=args.vsync,sync_refresh=args.sync_refresh)
     return 0
 
 if __name__=='__main__':

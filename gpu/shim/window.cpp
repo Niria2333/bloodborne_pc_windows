@@ -1,5 +1,6 @@
 // Windows port modifications by yaonikaixin999999, 2026-10-05.
 // bbport: SDL3 window for the Vulkan swapchain (Win32, X11 or Wayland).
+#include <cmath>
 #include <cstdlib>
 #include <cstring>
 #include <SDL3/SDL.h>
@@ -9,6 +10,72 @@
 #include "bbport_overlay.h"
 
 namespace Frontend {
+
+namespace {
+
+void SetFullscreenRefresh(SDL_Window* window) {
+    const char* requested = std::getenv("BB_FULLSCREEN_REFRESH_HZ");
+    if (!requested || !requested[0]) {
+        return;
+    }
+    char* end = nullptr;
+    const float refresh = std::strtof(requested, &end);
+    if (end == requested || *end || !std::isfinite(refresh) || refresh <= 0.0f) {
+        LOG_WARNING(Frontend, "Invalid fullscreen refresh rate {}; retaining desktop mode", requested);
+        return;
+    }
+
+    const SDL_DisplayID display = SDL_GetDisplayForWindow(window);
+    const SDL_DisplayMode* current = SDL_GetCurrentDisplayMode(display);
+    if (!current) {
+        LOG_WARNING(Frontend, "Cannot query fullscreen display mode: {}", SDL_GetError());
+        return;
+    }
+    const SDL_DisplayMode desktop = *current;
+    int count = 0;
+    SDL_DisplayMode** modes = SDL_GetFullscreenDisplayModes(display, &count);
+    const SDL_DisplayMode* closest = nullptr;
+    float distance = 0.5f;
+    for (int i = 0; modes && i < count; ++i) {
+        const SDL_DisplayMode* mode = modes[i];
+        const float difference = std::abs(mode->refresh_rate - refresh);
+        if (mode->w == desktop.w && mode->h == desktop.h && difference <= distance &&
+            (!closest || difference < distance || mode->format == desktop.format)) {
+            closest = mode;
+            distance = difference;
+        }
+    }
+    if (!closest) {
+        SDL_free(modes);
+        LOG_WARNING(Frontend, "Fullscreen {}x{} at {} Hz is unsupported; retaining desktop mode",
+                    desktop.w, desktop.h, refresh);
+        return;
+    }
+    const SDL_DisplayMode selected = *closest;
+    const bool applied = SDL_SetWindowFullscreenMode(window, &selected);
+    SDL_free(modes);
+    if (!applied) {
+        LOG_WARNING(Frontend, "Cannot select fullscreen refresh rate: {}", SDL_GetError());
+        if (!SDL_SetWindowFullscreenMode(window, nullptr) || !SDL_SyncWindow(window)) {
+            LOG_WARNING(Frontend, "Cannot restore desktop fullscreen mode: {}", SDL_GetError());
+        }
+        return;
+    }
+    if (!SDL_SyncWindow(window)) {
+        LOG_WARNING(Frontend, "Cannot synchronize fullscreen refresh rate: {}", SDL_GetError());
+        if (!SDL_SetWindowFullscreenMode(window, nullptr) || !SDL_SyncWindow(window)) {
+            LOG_WARNING(Frontend, "Cannot restore desktop fullscreen mode: {}", SDL_GetError());
+        }
+        return;
+    }
+    const SDL_DisplayMode* actual = SDL_GetCurrentDisplayMode(display);
+    if (actual) {
+        LOG_INFO(Frontend, "Exclusive fullscreen display {}x{} at {} Hz (requested {} Hz)",
+                 actual->w, actual->h, actual->refresh_rate, refresh);
+    }
+}
+
+} // namespace
 
 WindowSDL::WindowSDL(s32 width_, s32 height_, const char* title) : width{width_}, height{height_} {
     // Gamepads are sampled by runtime_pad.c; their events are pumped here with the window's.
@@ -32,6 +99,9 @@ WindowSDL::WindowSDL(s32 width_, s32 height_, const char* title) : width{width_}
     const char* driver = SDL_GetCurrentVideoDriver();
     const SDL_PropertiesID wp = SDL_GetWindowProperties(window);
     if (driver && !std::strcmp(driver, "windows")) {
+        if (fullscreen && fullscreen[0] == '1') {
+            SetFullscreenRefresh(window);
+        }
         window_info.type = WindowSystemType::Windows;
         window_info.render_surface = SDL_GetPointerProperty(wp, SDL_PROP_WINDOW_WIN32_HWND_POINTER, nullptr);
         ASSERT_MSG(window_info.render_surface, "SDL did not provide a Win32 window handle");
@@ -54,6 +124,18 @@ WindowSDL::WindowSDL(s32 width_, s32 height_, const char* title) : width{width_}
 }
 
 WindowSDL::~WindowSDL() {
+    if (SDL_GetWindowFullscreenMode(window)) {
+        const SDL_DisplayID display = SDL_GetDisplayForWindow(window);
+        if (SDL_SetWindowFullscreenMode(window, nullptr) && SDL_SyncWindow(window)) {
+            const SDL_DisplayMode* restored = SDL_GetCurrentDisplayMode(display);
+            if (restored) {
+                LOG_INFO(Frontend, "Restored desktop display {}x{} at {} Hz",
+                         restored->w, restored->h, restored->refresh_rate);
+            }
+        } else {
+            LOG_WARNING(Frontend, "Cannot synchronize desktop display restoration: {}", SDL_GetError());
+        }
+    }
     SDL_DestroyWindow(window);
 }
 

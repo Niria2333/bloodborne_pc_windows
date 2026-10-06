@@ -615,6 +615,15 @@ void VideoOutDriver::PresentThread(std::stop_token token) {
         return {};
     };
 
+    const auto wait_until_deadline = [](std::chrono::steady_clock::time_point deadline) {
+        const auto remaining = deadline - std::chrono::steady_clock::now();
+        if (remaining > std::chrono::steady_clock::duration::zero() &&
+            !Common::AccurateSleep(std::chrono::duration_cast<std::chrono::nanoseconds>(remaining),
+                                   nullptr, false)) {
+            std::this_thread::sleep_until(deadline);
+        }
+    };
+
     // bbport: with a frame limit (uncapped presets) a queued flip is presented as soon as it
     // arrives and its slot allows, between vblanks, instead of on the next vblank tick.
     const bool immediate_flips = frame_limit != 0;
@@ -692,7 +701,7 @@ void VideoOutDriver::PresentThread(std::stop_token token) {
                 if (next_flip >= tick_deadline) {
                     break;
                 }
-                std::this_thread::sleep_until(next_flip);
+                wait_until_deadline(next_flip);
             }
             const auto now = std::chrono::steady_clock::now();
             const auto request = receive_request();
@@ -702,7 +711,7 @@ void VideoOutDriver::PresentThread(std::stop_token token) {
                 FRAME_END;
             }
         }
-        std::this_thread::sleep_until(tick_deadline);
+        wait_until_deadline(tick_deadline);
     }
 }
 

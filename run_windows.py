@@ -24,17 +24,20 @@ PROFILES={
 SUPPORTED_TITLES=('CUSA03173','CUSA03023')
 LANGUAGES={'auto':None,'zh-cn':11,'zh-tw':10,'en':1}
 LANGUAGE_LABELS={'自动（优先中文）':'auto','简体中文':'zh-cn','繁体中文':'zh-tw','English':'en'}
-CONTROLLER_LAYOUTS=('ps4','xbox')
-CONTROLLER_LABELS={'原版（A=✕ / B=○）':'ps4','Xbox（A确认 / B返回）':'xbox'}
-CONTROLLER_HINTS={'ps4':'原版对应：○=B，✕=A，△=Y，□=X',
-                  'xbox':'Xbox 对应：○=A，✕=B，△=X，□=Y'}
+CONTROLLER_SWAPS={'ps4':(False,False),'swap-ab':(True,False),
+                  'swap-xy':(False,True),'xbox':(True,True)}
+CONTROLLER_LAYOUTS=tuple(CONTROLLER_SWAPS)
+CONTROLLER_HINTS={'ps4':'当前对应：A=✕，B=○，X=□，Y=△',
+                  'swap-ab':'当前对应：A=○，B=✕，X=□，Y=△',
+                  'swap-xy':'当前对应：A=✕，B=○，X=△，Y=□',
+                  'xbox':'当前对应：A=○，B=✕，X=△，Y=□'}
 FPS_LABELS={'30 帧 · 原版':'30','60 帧 · 推荐':'60','90 帧 · 实验':'90',
             '跟随显示器（最高 120 帧）· 实验':'uncap'}
 FPS_CHOICES=tuple(FPS_LABELS.values())
 
 def read_preferences():
     preferences={'game_dir':'','resolution':'1080p','language':'auto','fullscreen':False,
-                 'controller_layout':'ps4','fps':'60'}
+                 'controller_layout':'ps4','fps':'60','vsync':False}
     # Older launchers only saved launch.json. Recover the last profile on upgrade,
     # then prefer choices saved by the current launcher's window or command line.
     for path in (ROOT/'out/windows-data/launch.json',ROOT/'user/launcher.json'):
@@ -49,16 +52,34 @@ def read_preferences():
         if isinstance(saved.get('language'),str) and saved['language'] in LANGUAGES:
             preferences['language']=saved['language']
         if isinstance(saved.get('fullscreen'),bool): preferences['fullscreen']=saved['fullscreen']
+        if isinstance(saved.get('vsync'),bool): preferences['vsync']=saved['vsync']
         if isinstance(saved.get('controller_layout'),str) and saved['controller_layout'] in CONTROLLER_LAYOUTS:
             preferences['controller_layout']=saved['controller_layout']
         if isinstance(saved.get('fps'),str) and saved['fps'] in FPS_CHOICES:
             preferences['fps']=saved['fps']
+    game=Path(preferences['game_dir']) if preferences['game_dir'] else None
+    if game is not None and not game.is_absolute():
+        game=(ROOT/game).resolve()
+        preferences['game_dir']=str(game)
+    if game is None or not game.is_dir():
+        for title in SUPPORTED_TITLES:
+            try:
+                bundled=validate_game(ROOT/'game'/title)
+            except (ValueError,OSError):
+                continue
+            preferences['game_dir']=str(bundled)
+            break
     return preferences
 
 def save_preferences(preferences):
     path=ROOT/'user/launcher.json'
     path.parent.mkdir(parents=True,exist_ok=True)
-    path.write_text(json.dumps(preferences,ensure_ascii=False,indent=2),encoding='utf-8')
+    saved=dict(preferences)
+    if saved.get('game_dir'):
+        game=Path(saved['game_dir'])
+        if game.is_absolute() and game.resolve().is_relative_to(ROOT.resolve()):
+            saved['game_dir']=game.resolve().relative_to(ROOT.resolve()).as_posix()
+    path.write_text(json.dumps(saved,ensure_ascii=False,indent=2),encoding='utf-8')
 
 def resolve_language(game,selection='auto'):
     if selection not in LANGUAGES:
@@ -100,10 +121,11 @@ def runtime_environment():
     env['PATH']=os.pathsep.join(str(p) for p in candidates if p.is_dir())+os.pathsep+env.get('PATH','')
     # The launcher configuration also drives the offline resolution patches.
     for key in ('BB_UPSCALER','BB_UPSCALE_PRESET','BB_RENDER_RES','BB_OUTPUT_RES',
-                'BB_DMEM_MB','BB_LIVE_RES','BB_FPS','BB_FPS_LIMIT','BB_VBLANK_HZ','BB_LANGUAGE','BB_FULLSCREEN','BB_PAD_LAYOUT',
+                'BB_DMEM_MB','BB_LIVE_RES','BB_FPS','BB_FPS_LIMIT','BB_VBLANK_HZ','BB_LANGUAGE','BB_FULLSCREEN','BB_PAD_LAYOUT','BB_PRESENT_MODE',
                 'BB_CONFIG','BB_FSR_SHARPNESS','BB_JITTER','BB_REACTIVE','BB_REACTIVE_SCALE',
                 'BB_REACTIVE_THRESHOLD','BB_REACTIVE_MAX','BB_OBJECT_MOTION','BB_FSR4_DIR','BB_FSR4_OPT'):
         env.pop(key,None)
+    env.pop('BB_GPU_USER_DIR',None)
     return env
 
 def renderer_path():
@@ -113,13 +135,14 @@ def renderer_path():
 def execute(command,env):
     subprocess.run([str(v) for v in command],cwd=ROOT,env=env,check=True)
 
-def launch(game,resolution=None,prepare_only=False,*,language=None,fullscreen=None,controller_layout=None,fps=None):
+def launch(game,resolution=None,prepare_only=False,*,language=None,fullscreen=None,controller_layout=None,fps=None,vsync=None):
     game=validate_game(game)
     preferences=read_preferences()
     language=preferences['language'] if language is None else language
     fullscreen=preferences['fullscreen'] if fullscreen is None else fullscreen
     controller_layout=preferences['controller_layout'] if controller_layout is None else controller_layout
     fps=preferences['fps'] if fps is None else fps
+    vsync=preferences['vsync'] if vsync is None else vsync
     if fps not in FPS_CHOICES:
         raise ValueError(f'不支持的帧率选项：{fps}')
     if controller_layout not in CONTROLLER_LAYOUTS:
@@ -135,11 +158,12 @@ def launch(game,resolution=None,prepare_only=False,*,language=None,fullscreen=No
     elif config.is_file(): settings=load_settings(config)
     else: settings=write_profile(config,preferences['resolution'])
     preferences.update(game_dir=str(game),resolution=resolution or preferences['resolution'],
-                       language=language,fullscreen=fullscreen,controller_layout=controller_layout,fps=fps)
+                       language=language,fullscreen=fullscreen,controller_layout=controller_layout,fps=fps,vsync=vsync)
     save_preferences(preferences)
     env=runtime_environment()
     env.update(BB_LANGUAGE=str(language_id),BB_FULLSCREEN='1' if fullscreen else '0',
                BB_PAD_LAYOUT=controller_layout,BB_CONFIG=str(config),BB_FPS=fps,
+               BB_PRESENT_MODE='Fifo' if vsync else 'Immediate',
                BB_FSR4_DIR=str(ROOT/'fsr4_shaders'),BB_FSR4_OPT='1',
                BB_VBLANK_HZ='0' if fps=='uncap' else '90' if fps=='90' else '60')
     for script in ('prepare.py','link_libc.py','link_modules.py','content_profile.py'):
@@ -164,7 +188,7 @@ def launch(game,resolution=None,prepare_only=False,*,language=None,fullscreen=No
            'fps':fps,'target_fps':int(fps) if fps!='uncap' else 'display',
            'output_res':settings.get('output_res'),'upscaler':settings.get('upscaler','fsr3'),
            'language':language,'resolved_language':resolved_language,'language_id':language_id,
-           'fullscreen':fullscreen,'controller_layout':controller_layout,'gameplay_verified':False}
+           'fullscreen':fullscreen,'controller_layout':controller_layout,'vsync':vsync,'gameplay_verified':False}
     (data/'launch.json').write_text(json.dumps(state,ensure_ascii=False,indent=2),encoding='utf-8')
     if prepare_only: return
     env.update(BB_FRAME_STATS='1',BB_FRAMES_AHEAD='1',BB_LIVE_RES='0')
@@ -176,9 +200,9 @@ def launch(game,resolution=None,prepare_only=False,*,language=None,fullscreen=No
         if code!=75:
             if code: raise subprocess.CalledProcessError(code,args)
             break
-        return launch(game,resolution=None,language=language,fullscreen=fullscreen,controller_layout=controller_layout,fps=fps)
+        return launch(game,resolution=None,language=language,fullscreen=fullscreen,controller_layout=controller_layout,fps=fps,vsync=vsync)
 
-def gui(game_dir=None,resolution=None,language=None,fullscreen=None,controller_layout=None,fps=None):
+def gui(game_dir=None,resolution=None,language=None,fullscreen=None,controller_layout=None,fps=None,vsync=None):
     import tkinter as tk
     from tkinter import filedialog,messagebox,ttk
     root=tk.Tk()
@@ -225,16 +249,23 @@ def gui(game_dir=None,resolution=None,language=None,fullscreen=None,controller_l
                  state='readonly',width=20).pack(side='left')
     chosen_fullscreen=tk.BooleanVar(value=preferences['fullscreen'] if fullscreen is None else fullscreen)
     ttk.Checkbutton(options,text='全屏运行',variable=chosen_fullscreen).pack(side='left',padx=(20,0))
+    chosen_vsync=tk.BooleanVar(value=preferences['vsync'] if vsync is None else vsync)
+    ttk.Checkbutton(options,text='垂直同步',variable=chosen_vsync).pack(side='left',padx=(20,0))
     controller_options=ttk.Frame(frame); controller_options.pack(fill='x',pady=(0,8))
     ttk.Label(controller_options,text='手柄按键：').pack(side='left')
     layout=preferences['controller_layout'] if controller_layout is None else controller_layout
-    chosen_controller=tk.StringVar(value=next(label for label,value in CONTROLLER_LABELS.items() if value==layout))
-    ttk.Combobox(controller_options,textvariable=chosen_controller,values=list(CONTROLLER_LABELS),
-                 state='readonly',width=28).pack(side='left')
+    chosen_swap_ab=tk.BooleanVar(value=CONTROLLER_SWAPS[layout][0])
+    chosen_swap_xy=tk.BooleanVar(value=CONTROLLER_SWAPS[layout][1])
+    ttk.Checkbutton(controller_options,text='A/B 互换',variable=chosen_swap_ab).pack(side='left')
+    ttk.Checkbutton(controller_options,text='X/Y 互换',variable=chosen_swap_xy).pack(side='left',padx=(20,0))
+    def chosen_controller_layout():
+        swaps=(chosen_swap_ab.get(),chosen_swap_xy.get())
+        return next(name for name,pair in CONTROLLER_SWAPS.items() if pair==swaps)
     controller_hint=tk.StringVar(value=CONTROLLER_HINTS[layout])
     def update_controller_hint(*_):
-        controller_hint.set(CONTROLLER_HINTS[CONTROLLER_LABELS[chosen_controller.get()]])
-    chosen_controller.trace_add('write',update_controller_hint)
+        controller_hint.set(CONTROLLER_HINTS[chosen_controller_layout()])
+    chosen_swap_ab.trace_add('write',update_controller_hint)
+    chosen_swap_xy.trace_add('write',update_controller_hint)
     ttk.Label(frame,textvariable=controller_hint).pack(anchor='w',pady=(0,12))
     ttk.Label(frame,text='“画面设置”可调整 FSR、抗锯齿和游戏特效。').pack(anchor='w')
     ttk.Label(frame,text='30 帧使用原版时序；90 帧与高刷新率为实验选项。').pack(anchor='w',pady=(8,0))
@@ -247,7 +278,8 @@ def gui(game_dir=None,resolution=None,language=None,fullscreen=None,controller_l
         profile={'1280x720':'1080p','1920x1080':'1080p','2560x1440':'1440p','3840x2160':'4k'}[output]
         preferences.update(game_dir=game.get(),resolution=profile,
                            language=LANGUAGE_LABELS[chosen_language.get()],fullscreen=chosen_fullscreen.get(),
-                           controller_layout=CONTROLLER_LABELS[chosen_controller.get()],fps=FPS_LABELS[chosen_fps.get()])
+                           controller_layout=chosen_controller_layout(),fps=FPS_LABELS[chosen_fps.get()],
+                           vsync=chosen_vsync.get())
         graphics.values() # validate every field before saving any changes
         changes=graphics.changes()
         if changes: save_settings(ROOT/'bbport.ini',changes)
@@ -289,7 +321,8 @@ def gui(game_dir=None,resolution=None,language=None,fullscreen=None,controller_l
             process=subprocess.Popen([sys.executable,str(ROOT/'run_windows.py'),'--game',game.get(),
                               '--language',LANGUAGE_LABELS[chosen_language.get()],
                               '--fps',FPS_LABELS[chosen_fps.get()],
-                              '--controller-layout',CONTROLLER_LABELS[chosen_controller.get()],
+                              '--controller-layout',chosen_controller_layout(),
+                              '--vsync' if chosen_vsync.get() else '--no-vsync',
                               '--fullscreen' if chosen_fullscreen.get() else '--windowed'],cwd=ROOT,env=child_env,
                               stdout=log_handle,stderr=subprocess.STDOUT,
                               creationflags=getattr(subprocess,'CREATE_NO_WINDOW',0))
@@ -311,17 +344,25 @@ def main():
     parser.add_argument('--fps',choices=FPS_CHOICES,help='30、60、90 帧或跟随显示器（最高 120 帧）；省略时沿用已保存的选择。')
     parser.add_argument('--language',choices=LANGUAGES,help='游戏语言；自动优先使用已有简体、繁体中文资源。')
     parser.add_argument('--controller-layout',choices=CONTROLLER_LAYOUTS,
-                        help='手柄按键方案：xbox 为 ○=A、✕=B、△=X、□=Y；省略时沿用已保存的设置。')
+                        help='手柄按键：ps4 原版，swap-ab 仅 A/B 互换，swap-xy 仅 X/Y 互换，xbox 两组互换；省略时沿用已保存的设置。')
     display=parser.add_mutually_exclusive_group()
     display.add_argument('--fullscreen',dest='fullscreen',action='store_true',default=None,
                          help='全屏运行。省略时沿用已保存的设置。')
     display.add_argument('--windowed','--no-fullscreen',dest='fullscreen',action='store_false',
                          help='窗口运行。省略时沿用已保存的设置。')
+    sync=parser.add_mutually_exclusive_group()
+    sync.add_argument('--vsync',dest='vsync',action='store_true',default=None,
+                      help='开启垂直同步；省略时沿用已保存的设置。')
+    sync.add_argument('--no-vsync',dest='vsync',action='store_false',
+                      help='关闭垂直同步；省略时沿用已保存的设置。')
     parser.add_argument('--prepare-only',action='store_true')
     parser.add_argument('--gui',action='store_true')
     parser.add_argument('--check',action='store_true')
     args=parser.parse_args()
-    if args.gui: gui(args.game,args.resolution,args.language,args.fullscreen,args.controller_layout,args.fps); return 0
+    if args.gui: gui(args.game,args.resolution,args.language,args.fullscreen,args.controller_layout,args.fps,args.vsync); return 0
+    if args.game is None:
+        saved_game=read_preferences()['game_dir']
+        if saved_game: args.game=Path(saved_game)
     if args.check:
         print(json.dumps({'windows':os.name=='nt','renderer_built':renderer_path().is_file(),
                           'game_dir':str(args.game) if args.game else None,'target_fps':60,
@@ -332,7 +373,7 @@ def main():
         return 0
     if not args.game: parser.error('请指定 --game 游戏目录，或使用 --gui。')
     launch(args.game,args.resolution,args.prepare_only,language=args.language,fullscreen=args.fullscreen,
-           controller_layout=args.controller_layout,fps=args.fps)
+           controller_layout=args.controller_layout,fps=args.fps,vsync=args.vsync)
     return 0
 
 if __name__=='__main__':

@@ -39,7 +39,7 @@ pacman -S --needed mingw-w64-ucrt-x86_64-gcc \
 powershell -NoProfile -ExecutionPolicy Bypass -File .\build_windows.ps1 -MsysRoot "C:\msys64" -Test
 ```
 
-将 `C:\msys64` 换成实际安装位置。脚本也会自动探测默认目录及源码上级目录的 `tools-local/msys64`。`-Test` 运行 CTest 和七组 Python 测试，任一失败都会停止；仅编译时省略它。默认并行 4 个任务，可用 `-Jobs 3` 降低内存压力，`-BuildDir` 指定其他构建目录。`-Diagnostics` 仅构建诊断后端，不能玩游戏。
+将 `C:\msys64` 换成实际安装位置。脚本也会自动探测默认目录及源码上级目录的 `tools-local/msys64`。`-Test` 运行 CTest 和八组 Python 测试，包括修改器的合成 Windows 进程集成测试；任一失败都会停止。仅编译时省略它。默认并行 4 个任务，可用 `-Jobs 3` 降低内存压力，`-BuildDir` 指定其他构建目录。`-Diagnostics` 仅构建诊断后端，不能玩游戏。
 
 CMake 首次配置会下载固定版本的 magic_enum、xbyak、miniz 等依赖，需要联网；已有 `out/dependency-sources/` 缓存时构建脚本可以复用。完整产物为 `out/windows/bin/bb-probe.exe`。
 
@@ -64,6 +64,8 @@ CUSA03023/
 
 启动器读取 `param.sfo`，检查 `TITLE_ID=CUSA03173` 或 `CUSA03023`、`APP_VER=01.09` 或 `1.09`，准备脚本继续验证可加载代码。编号是 PS4 游戏发行版本标识，文件夹名称本身不能改变编号。无需重命名 CUSA03023，也不要选择它的上级目录。更新须已合并为 1.09；程序不下载游戏或系统模块。
 
+也可以自行将游戏数据放在源码目录的 `game/CUSA03023` 或 `game/CUSA03173`。没有有效的已选目录时，启动器会自动检测这两个位置；已有有效的外部目录仍会保留。源码目录内的游戏路径保存为相对路径，整个本地目录移动后可继续识别；命令行省略 `--game` 时沿用已保存或自动检测到的目录。
+
 ## 启动与设置
 
 ```powershell
@@ -74,7 +76,18 @@ python .\run_windows.py --gui
 
 游戏语言支持 `auto/zh-cn/zh-tw/en`。自动模式优先检测 `dvdroot_ps4/msg/zhocn` 简体资源，再检测 `zhotw` 繁体资源，最后英语；明确选择中文但资源缺失时会报错。全屏勾选框使用无边框全屏。
 
-手柄可选原版映射或 Xbox 映射。亚洲版游戏通常使用 ○ 确认、✕ 返回：原版对应 Xbox B/A；Xbox 方案为 `A/B/X/Y → ○/✕/△/□`。角色命名屏幕键盘使用 A 选择、B 取消、X 删除、Y 或 Start 完成。键盘菜单方向为 I/K/J/L，左 Shift 为 ○，空格为 ✕。
+“全屏运行”旁的“垂直同步”勾选框控制显示器同步，保存后在下次启动游戏时生效，独立于游戏帧率选择。勾选使用 FIFO，取消使用 Immediate；如果显卡不支持 Immediate，渲染器会回退到 FIFO。命令行可用 `--vsync` / `--no-vsync`，省略时沿用已保存选择；首次默认关闭。
+
+启动器提供独立的“A/B 互换”和“X/Y 互换”勾选框，可只换一组或同时换两组。选择保存后在下次启动游戏时生效，下方显示当前对应关系。旧 Xbox 方案会恢复为两项都勾选。
+
+| `--controller-layout` | 互换 | 实体 A/B/X/Y 对应游戏按键 |
+| --- | --- | --- |
+| `ps4` | 原版 | ✕ / ○ / □ / △ |
+| `swap-ab` | 仅 A/B | ○ / ✕ / □ / △ |
+| `swap-xy` | 仅 X/Y | ✕ / ○ / △ / □ |
+| `xbox` | A/B 和 X/Y | ○ / ✕ / △ / □ |
+
+亚洲版游戏通常使用 ○ 确认、✕ 返回，勾选 A/B 互换后对应实体 A/B。角色命名屏幕键盘使用实体 A 选择、B 取消、X 删除、Y 或 Start 完成。键盘菜单方向为 I/K/J/L，左 Shift 为 ○，空格为 ✕。
 
 ```powershell
 python .\run_windows.py --game "C:\Games\CUSA03023" --resolution 1080p --fps 60 --language zh-cn --controller-layout xbox --windowed
@@ -104,6 +117,10 @@ FSR 3.1 与 FSR 4 的 Quality/Balanced 等预设以较低场景分辨率重建�
 帧率选项为 `--fps 30|60|90|uncap`。30/60 使用 60 Hz vblank，90 使用 90 Hz；`uncap` 使用显示器节奏（当前上游实现最高 120 帧）。90 和 `uncap` 标记为实验功能，目前仅验证参数/补丁一致性。60 帧目标对应约 16.7 ms 每帧，补丁不能保证每个场景均达到目标。
 
 画面设置还包括锐化、运动向量、响应遮罩、景深、运动模糊、SSAO、动态阴影、SSR、模型 LOD、显示帧率和跳过开场。进入游戏后可用 **Insert** 或 **L3+R3** 打开移植设置菜单；部分分辨率/预设变化需“应用并重启”，启动器会接收重启请求并保留选择。
+
+## Windows 修改器
+
+双击 `start_trainer.cmd` 打开中文修改器，或执行 `python bloodborne_trainer.py --gui`。先启动本项目的原生游戏程序，再扫描、连接并点击“应用设置”。支持生命/体力补满、血之回响数值和已有物品数量，连接本身不会启用功能。正常关闭或断开会还原指令；具体行为、范围、测试和社区来源见 [WINDOWS_TRAINER.md](WINDOWS_TRAINER.md)。
 
 ## 可选 FSR 4 v07 资源
 

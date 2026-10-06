@@ -1,8 +1,9 @@
 // Windows port modifications by yaonikaixin999999, 2026-10-05.
 /* libScePad on SDL3 gamepads, with a keyboard fallback. SDL events are pumped
  * by the window thread (gpu/shim/window.cpp); here state is only sampled.
- * BB_PAD_LAYOUT=xbox maps A/B/X/Y to Circle/Cross/Triangle/Square; the
- * default (ps4) uses the physical PlayStation button positions.
+ * BB_PAD_LAYOUT=swap-ab swaps A/B, swap-xy swaps X/Y, and xbox swaps both
+ * pairs for compatibility. The default (ps4) uses the physical PlayStation
+ * button positions.
  *
  * Keyboard layout (when no gamepad is connected):
  *   WASD left stick, arrow keys right stick, Space Cross, LShift Circle,
@@ -103,16 +104,18 @@ static void sample_host(PadData *d) {
     const bool *k=SDL_WasInit(SDL_INIT_VIDEO) ? SDL_GetKeyboardState(NULL) : NULL;
     if (g) {
         const char *layout=getenv("BB_PAD_LAYOUT");
-        const int xbox=layout && !strcmp(layout,"xbox");
-        static const struct { SDL_GamepadButton sdl; uint32_t ps4, xbox; } face_map[]={
-            {SDL_GAMEPAD_BUTTON_SOUTH,BTN_CROSS,BTN_CIRCLE},
-            {SDL_GAMEPAD_BUTTON_EAST,BTN_CIRCLE,BTN_CROSS},
-            {SDL_GAMEPAD_BUTTON_WEST,BTN_SQUARE,BTN_TRIANGLE},
-            {SDL_GAMEPAD_BUTTON_NORTH,BTN_TRIANGLE,BTN_SQUARE},
+        enum { SWAP_AB=1, SWAP_XY=2 };
+        const unsigned swaps=!layout ? 0 : !strcmp(layout,"xbox") ? SWAP_AB|SWAP_XY :
+            !strcmp(layout,"swap-ab") ? SWAP_AB : !strcmp(layout,"swap-xy") ? SWAP_XY : 0;
+        static const struct { SDL_GamepadButton sdl; uint32_t ps4, swapped; unsigned pair; } face_map[]={
+            {SDL_GAMEPAD_BUTTON_SOUTH,BTN_CROSS,BTN_CIRCLE,SWAP_AB},
+            {SDL_GAMEPAD_BUTTON_EAST,BTN_CIRCLE,BTN_CROSS,SWAP_AB},
+            {SDL_GAMEPAD_BUTTON_WEST,BTN_SQUARE,BTN_TRIANGLE,SWAP_XY},
+            {SDL_GAMEPAD_BUTTON_NORTH,BTN_TRIANGLE,BTN_SQUARE,SWAP_XY},
         };
         for (size_t i=0;i<sizeof(face_map)/sizeof(*face_map);++i)
             if (SDL_GetGamepadButton(g,face_map[i].sdl))
-                d->buttons|=xbox ? face_map[i].xbox : face_map[i].ps4;
+                d->buttons|=(swaps & face_map[i].pair) ? face_map[i].swapped : face_map[i].ps4;
         static const struct { SDL_GamepadButton sdl; uint32_t ps; } map[]={
             {SDL_GAMEPAD_BUTTON_LEFT_SHOULDER,BTN_L1}, {SDL_GAMEPAD_BUTTON_RIGHT_SHOULDER,BTN_R1},
             {SDL_GAMEPAD_BUTTON_LEFT_STICK,BTN_L3}, {SDL_GAMEPAD_BUTTON_RIGHT_STICK,BTN_R3},

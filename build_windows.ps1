@@ -29,7 +29,8 @@ if($Test){
     if($LASTEXITCODE){throw 'Windows runtime tests failed.'}
     $env:BB_TEST_PROBE=Join-Path $build 'bin/bb-probe.exe'
     $env:BB_TEST_CONTENT=Join-Path $build 'bin/windows-content-test.exe'
-    foreach($suite in @('test_probe.py','test_prepare.py','test_link_libc.py','test_patches.py','test_content.py','test_windows_launcher.py','test_windows_graphics.py')){
+    $env:BB_TRAINER_FIXTURE=Join-Path $build 'bin/trainer-fixture-windows.exe'
+    foreach($suite in @('test_probe.py','test_prepare.py','test_link_libc.py','test_patches.py','test_content.py','test_windows_launcher.py','test_windows_graphics.py','test_windows_trainer*.py')){
         & python -m unittest discover -s tests -p $suite
         if($LASTEXITCODE){throw "Python test suite failed: $suite"}
     }

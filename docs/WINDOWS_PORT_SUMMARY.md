@@ -1,6 +1,6 @@
 # Windows 移植总结
 
-日期：2026-10-05。公开源码：[yaonikaixin999999/bloodborne_pc_windows](https://github.com/yaonikaixin999999/bloodborne_pc_windows)，Windows 分支为 `codex/windows-port`。
+更新日期：2026-10-06；初版游戏实测日期：2026-10-05。公开源码：[yaonikaixin999999/bloodborne_pc_windows](https://github.com/yaonikaixin999999/bloodborne_pc_windows)，Windows 分支为 `codex/windows-port`。
 
 ## 来源与范围
 
@@ -17,18 +17,21 @@
 | 内存与异常 | Windows 占位符与稀疏共享映射、16 KiB guest 对齐、部分映射/解除映射、别名与保护；VEH 页面错误及投机访问恢复 |
 | 视频 | 修复 AvPlayer 重复 join、停止/EOF 顺序、数据队列和重入锁问题，解决开场结束或跳过后黑屏 |
 | 音频 | 用 SDL 精确等待替代 Windows 粗粒度等待，修复约 5.33 ms 缓冲周期被延迟并连续补发的问题 |
-| 输入 | 保留原版按键，增加可选 Xbox 确认/返回映射；可见角色命名键盘及取消、重开、松开键、长度限制处理 |
-| 启动器 | 中文界面；游戏语言自动/简体/繁体/英语、窗口/全屏、独立分辨率与质量、30/60/90/显示器节奏选项 |
+| 输入 | 独立 A/B、X/Y 互换，支持原版、只换一组或两组同时换；可见角色命名键盘及取消、重开、松开键、长度限制处理 |
+| 启动器 | 中文界面；游戏语言自动/简体/繁体/英语、窗口/全屏、垂直同步、独立分辨率与质量、30/60/90/显示器节奏选项；本地目录检测与相对游戏路径保存 |
+| 修改器 | 独立中文窗口，生命/体力补满、血之回响和已有物品数量；代码校验、暂停线程写入、失败回滚和正常断开还原 |
 | 画面设置 | FSR 3.1、FSR 4 v07 INT8、TAA、关闭超分、锐化、运动向量、响应遮罩、景深/模糊/SSAO/阴影/SSR/LOD；增量保存避免覆盖其他设置 |
 | FSR 4 工具 | 固定 Q2RTX 源提交下载，模型/着色器大小和 SHA256 校验、SPIR-V 验证及 Windows 优化转换 |
 
-Xbox 映射为 `A/B/X/Y → ○/✕/△/□`；角色命名键盘使用 A 选择、B 取消、X 删除、Y 或 Start 完成。中文需要游戏目录中已有相应语言资源，不向游戏安装新翻译数据。
+“A/B 互换”和“X/Y 互换”可分别勾选；旧 Xbox 映射为两组同时互换，仍是 `A/B/X/Y → ○/✕/△/□`。角色命名键盘使用实体 A 选择、B 取消、X 删除、Y 或 Start 完成。垂直同步独立于游戏帧率选择，保存后下次启动生效。中文需要游戏目录中已有相应语言资源，不向游戏安装新翻译数据。
+
+修改器通过 `start_trainer.cmd` 单独打开，只连接本项目原生 Windows 游戏进程。物品功能调整已有数量，不生成新物品；正常恢复指令不会撤销已经写入或保存的回响和物品数值。用法和限制见 [WINDOWS_TRAINER.md](WINDOWS_TRAINER.md)。
 
 ## 实际结果
 
 CUSA03023 1.09 已在 Windows 11、i5-13600KF、RTX 4070 Ti 12 GB、约 16 GB 系统内存的电脑上启动，经过开场和角色创建进入首个可玩区域。用户确认角色命名和进入游戏正常。1080p 预热后观察到 60 FPS，着色器编译时曾短暂下降至约 51～56 FPS。音频缓冲供给测试通过，观察区间没有缓冲耗尽；这不是完整听感质量评测。
 
-最终构建验证通过 **16/16 CTest、74/74 Python 测试**。FSR 4 v07 下载器校验了 182 个上游资源，194 个 SPIR-V 校验通过；RTX 4070 Ti 上独立基准 `1280×720 → 1920×1080 Quality` 运行 8 帧并正常退出。详细范围见 [WINDOWS_VALIDATION.md](WINDOWS_VALIDATION.md)。
+2026-10-06 完整构建验证通过 **16/16 CTest、107/107 Python 测试**，含 20 项启动器和 28 项修改器测试。手柄测试覆盖四种布局的全部 16 种面键组合；修改器在真实 Windows 合成进程上验证开关、重新配置与还原，尚未逐一实测全部游戏内场景和物品。FSR 4 v07 下载器校验了 182 个上游资源，194 个 SPIR-V 校验通过；RTX 4070 Ti 上独立基准 `1280×720 → 1920×1080 Quality` 运行 8 帧并正常退出。详细范围见 [WINDOWS_VALIDATION.md](WINDOWS_VALIDATION.md)。
 
 ## 未完成与限制
 
@@ -38,4 +41,4 @@ FSR 4.1.1 Windows 适配未完成。本机没有 `VK_VALVE_shader_mixed_float_do
 
 ## 许可与贡献
 
-本分支沿用 [GPL-2.0-or-later](../LICENSE)。上游 bbport、shadPS4 图形核心、FSR-Vulkan、AMD FidelityFX、Dear ImGui、LibAtrac9 等保留其署名和许可；社区帧率/图形补丁也保留原贡献者信息。代码发布包含构建脚本与测试，便于审查和复现。运行与构建方法见 [WINDOWS.md](WINDOWS.md)。
+本分支沿用 [GPL-2.0-or-later](../LICENSE)。上游 bbport、shadPS4 图形核心、FSR-Vulkan、AMD FidelityFX、Dear ImGui、LibAtrac9 等保留其署名和许可；社区帧率/图形补丁也保留原贡献者信息。修改器 Hook 位置与字段含义参考 Shiningami 的 Bloodborne 1.09 社区修改表，Windows 内存操作和还原流程由本项目重新实现。代码发布包含构建脚本与测试，便于审查和复现。运行与构建方法见 [WINDOWS.md](WINDOWS.md)。

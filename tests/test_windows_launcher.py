@@ -42,7 +42,7 @@ class WindowsLauncherTests(unittest.TestCase):
     def test_parent_resolution_overrides_do_not_desynchronize_patches_and_renderer(self):
         inherited={'BB_UPSCALER':'off','BB_UPSCALE_PRESET':'4','BB_RENDER_RES':'640x360',
                    'BB_OUTPUT_RES':'1280x720','BB_FPS':'90','BB_VBLANK_HZ':'90',
-                   'BB_LANGUAGE':'1','BB_FULLSCREEN':'0','BB_PAD_LAYOUT':'xbox',
+                   'BB_LANGUAGE':'1','BB_FULLSCREEN':'0','BB_PAD_LAYOUT':'xbox','BB_PRESENT_MODE':'Mailbox',
                    'BB_FPS_LIMIT':'25','BB_JITTER':'0','BB_REACTIVE':'1','BB_OBJECT_MOTION':'0',
                    'BB_FSR_SHARPNESS':'2','BB_CONFIG':'old-config.ini'}
         with patch.dict(os.environ,inherited):
@@ -88,6 +88,7 @@ class WindowsLauncherTests(unittest.TestCase):
             self.assertEqual(patch_command[patch_command.index('--fps')+1],'60')
             self.assertEqual(patch_command[patch_command.index('--output-res')+1],'3840x2160')
             self.assertEqual(patch_command[patch_command.index('--render-res')+1],'2258x1270')
+            self.assertEqual(execute.call_args.args[1]['BB_PRESENT_MODE'],'Immediate')
             self.assertFalse((root/'out/windows-data/launch.json').read_text().find('false')<0)
 
     def test_auto_language_prefers_available_chinese_and_can_be_overridden(self):
@@ -111,26 +112,34 @@ class WindowsLauncherTests(unittest.TestCase):
             language_fixture(game,'zhocn')
             with patch.object(launcher,'ROOT',root),patch.object(launcher,'execute') as execute, \
                  patch.dict(os.environ,{'BB_LANGUAGE':'1','BB_FULLSCREEN':'1'}):
-                launcher.launch(game,'4k',prepare_only=True,fullscreen=False)
+                launcher.launch(game,'4k',prepare_only=True,fullscreen=False,vsync=True)
                 preferences=launcher.read_preferences()
                 self.assertEqual(preferences['language'],'auto')
                 self.assertEqual(preferences['resolution'],'4k')
                 self.assertFalse(preferences['fullscreen'])
+                self.assertTrue(preferences['vsync'])
                 self.assertEqual(preferences['game_dir'],str(game.resolve()))
                 for call in execute.call_args_list:
                     self.assertEqual(call.args[1]['BB_LANGUAGE'],'11')
                     self.assertEqual(call.args[1]['BB_FULLSCREEN'],'0')
+                    self.assertEqual(call.args[1]['BB_PRESENT_MODE'],'Fifo')
                 state=json.loads((root/'out/windows-data/launch.json').read_text(encoding='utf-8'))
                 self.assertEqual(state['resolved_language'],'zh-cn')
                 self.assertEqual(state['language_id'],11)
                 self.assertFalse(state['fullscreen'])
+                self.assertTrue(state['vsync'])
                 launcher.launch(game,prepare_only=True)
                 self.assertEqual(launcher.read_preferences(),preferences)
                 self.assertEqual(execute.call_args_list[-1].args[1]['BB_FULLSCREEN'],'0')
+                self.assertEqual(execute.call_args_list[-1].args[1]['BB_PRESENT_MODE'],'Fifo')
                 launcher.launch(game,'1440p',prepare_only=True)
                 self.assertEqual(launcher.read_preferences()['resolution'],'1440p')
                 self.assertEqual(execute.call_args_list[-1].args[1]['BB_LANGUAGE'],'11')
                 self.assertEqual(execute.call_args_list[-1].args[1]['BB_FULLSCREEN'],'0')
+                launcher.launch(game,prepare_only=True,vsync=False)
+                self.assertFalse(launcher.read_preferences()['vsync'])
+                self.assertEqual(execute.call_args_list[-1].args[1]['BB_PRESENT_MODE'],'Immediate')
+                self.assertFalse(json.loads((root/'out/windows-data/launch.json').read_text(encoding='utf-8'))['vsync'])
 
     def test_controller_layout_defaults_persists_and_overrides_inherited_environment(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -142,13 +151,16 @@ class WindowsLauncherTests(unittest.TestCase):
                 for call in execute.call_args_list:
                     self.assertEqual(call.args[1]['BB_PAD_LAYOUT'],'ps4')
                 execute.reset_mock()
-                launcher.launch(game,prepare_only=True,controller_layout='xbox')
-                self.assertEqual(launcher.read_preferences()['controller_layout'],'xbox')
-                state=json.loads((root/'out/windows-data/launch.json').read_text(encoding='utf-8'))
-                self.assertEqual(state['controller_layout'],'xbox')
-                launcher.launch(game,prepare_only=True)
-                for call in execute.call_args_list:
-                    self.assertEqual(call.args[1]['BB_PAD_LAYOUT'],'xbox')
+                for layout in ('swap-ab','swap-xy','xbox'):
+                    with self.subTest(layout=layout):
+                        execute.reset_mock()
+                        launcher.launch(game,prepare_only=True,controller_layout=layout)
+                        self.assertEqual(launcher.read_preferences()['controller_layout'],layout)
+                        state=json.loads((root/'out/windows-data/launch.json').read_text(encoding='utf-8'))
+                        self.assertEqual(state['controller_layout'],layout)
+                        launcher.launch(game,prepare_only=True)
+                        for call in execute.call_args_list:
+                            self.assertEqual(call.args[1]['BB_PAD_LAYOUT'],layout)
                 execute.reset_mock()
                 with self.assertRaisesRegex(ValueError,'手柄按键'):
                     launcher.launch(game,prepare_only=True,controller_layout='invalid')
@@ -163,26 +175,41 @@ class WindowsLauncherTests(unittest.TestCase):
             executable.parent.mkdir(parents=True); executable.write_bytes(b'fixture')
             with patch.object(launcher,'ROOT',root),patch.object(launcher,'execute'), \
                  patch.object(launcher.subprocess,'call',side_effect=[75,0]) as renderer:
-                launcher.launch(game,'1080p',language='zh-tw',fullscreen=False,controller_layout='xbox')
+                launcher.launch(game,'1080p',language='zh-tw',fullscreen=False,controller_layout='xbox',vsync=True)
                 self.assertEqual(renderer.call_count,2)
                 for call in renderer.call_args_list:
                     self.assertEqual(call.kwargs['env']['BB_LANGUAGE'],'10')
                     self.assertEqual(call.kwargs['env']['BB_FULLSCREEN'],'0')
                     self.assertEqual(call.kwargs['env']['BB_FPS'],'60')
                     self.assertEqual(call.kwargs['env']['BB_PAD_LAYOUT'],'xbox')
+                    self.assertEqual(call.kwargs['env']['BB_PRESENT_MODE'],'Fifo')
                 self.assertEqual(launcher.read_preferences()['language'],'zh-tw')
                 self.assertFalse(launcher.read_preferences()['fullscreen'])
+
+    def test_independent_swap_choices_reach_renderer_and_survive_restart(self):
+        for layout in ('swap-ab','swap-xy'):
+            with self.subTest(layout=layout),tempfile.TemporaryDirectory() as tmp:
+                root=Path(tmp); game=game_fixture(root/'game')
+                executable=root/'dist/windows/bb-probe.exe'
+                executable.parent.mkdir(parents=True); executable.write_bytes(b'fixture')
+                with patch.object(launcher,'ROOT',root),patch.object(launcher,'execute'), \
+                     patch.object(launcher.subprocess,'call',side_effect=[75,0]) as renderer:
+                    launcher.launch(game,'1080p',controller_layout=layout)
+                    self.assertEqual(renderer.call_count,2)
+                    for call in renderer.call_args_list:
+                        self.assertEqual(call.kwargs['env']['BB_PAD_LAYOUT'],layout)
 
     def test_invalid_preferences_fall_back_and_cli_forwards_choices(self):
         with tempfile.TemporaryDirectory() as tmp:
             root=Path(tmp); (root/'user').mkdir()
             preferences=root/'user/launcher.json'
             preferences.write_text(json.dumps({'resolution':[],'language':{},'fullscreen':'false',
-                                               'controller_layout':[]}))
+                                               'controller_layout':[],'vsync':'false'}))
             with patch.object(launcher,'ROOT',root):
                 self.assertEqual(launcher.read_preferences()['language'],'auto')
                 self.assertFalse(launcher.read_preferences()['fullscreen'])
                 self.assertEqual(launcher.read_preferences()['controller_layout'],'ps4')
+                self.assertFalse(launcher.read_preferences()['vsync'])
                 preferences.write_text('{invalid')
                 self.assertEqual(launcher.read_preferences()['resolution'],'1080p')
             for flag in ('--windowed','--no-fullscreen'):
@@ -192,12 +219,12 @@ class WindowsLauncherTests(unittest.TestCase):
                      patch.object(launcher,'launch') as launch:
                     self.assertEqual(launcher.main(),0)
                     launch.assert_called_once_with(root,None,False,language='zh-cn',fullscreen=False,
-                                                   controller_layout='xbox',fps=None)
+                                                   controller_layout='xbox',fps=None,vsync=None)
             with patch.object(launcher.sys,'argv',['run_windows.py','--gui','--language','en','--fullscreen',
                                                  '--controller-layout','xbox']), \
                  patch.object(launcher,'gui') as gui:
                 self.assertEqual(launcher.main(),0)
-                gui.assert_called_once_with(None,None,'en',True,'xbox',None)
+                gui.assert_called_once_with(None,None,'en',True,'xbox',None,None)
 
     def test_legacy_launch_profile_is_restored_and_saved_choices_take_precedence(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -208,23 +235,69 @@ class WindowsLauncherTests(unittest.TestCase):
                                          'language':'zh-tw','fullscreen':True}))
             with patch.object(launcher,'ROOT',root):
                 self.assertEqual(launcher.read_preferences(),{
-                    'game_dir':'previous game','resolution':'4k-native',
-                    'language':'zh-tw','fullscreen':True,'controller_layout':'ps4','fps':'60'})
+                    'game_dir':str((root/'previous game').resolve()),'resolution':'4k-native',
+                    'language':'zh-tw','fullscreen':True,'controller_layout':'ps4','fps':'60','vsync':False})
                 launcher.save_preferences({'resolution':'1440p','language':'auto','fullscreen':False})
                 self.assertEqual(launcher.read_preferences(),{
-                    'game_dir':'previous game','resolution':'1440p',
-                    'language':'auto','fullscreen':False,'controller_layout':'ps4','fps':'60'})
+                    'game_dir':str((root/'previous game').resolve()),'resolution':'1440p',
+                    'language':'auto','fullscreen':False,'controller_layout':'ps4','fps':'60','vsync':False})
 
     def test_cli_display_flags_are_optional_and_mutually_exclusive(self):
         with patch.object(launcher.sys,'argv',['run_windows.py','--game','unused']), \
              patch.object(launcher,'launch') as launch:
             self.assertEqual(launcher.main(),0)
             launch.assert_called_once_with(Path('unused'),None,False,language=None,fullscreen=None,
-                                           controller_layout=None,fps=None)
+                                           controller_layout=None,fps=None,vsync=None)
         with patch.object(launcher.sys,'argv',['run_windows.py','--gui','--fullscreen','--windowed']), \
              patch.object(launcher.sys,'stderr'),self.assertRaises(SystemExit) as error:
             launcher.main()
         self.assertEqual(error.exception.code,2)
+
+    def test_cli_vsync_flags_forward_and_are_mutually_exclusive(self):
+        for flag,enabled in (('--vsync',True),('--no-vsync',False)):
+            with self.subTest(flag=flag), \
+                 patch.object(launcher.sys,'argv',['run_windows.py','--game','unused',flag]), \
+                 patch.object(launcher,'launch') as launch:
+                self.assertEqual(launcher.main(),0)
+                self.assertIs(launch.call_args.kwargs['vsync'],enabled)
+            with self.subTest(gui=flag), \
+                 patch.object(launcher.sys,'argv',['run_windows.py','--gui',flag]), \
+                 patch.object(launcher,'gui') as gui:
+                self.assertEqual(launcher.main(),0)
+                self.assertIs(gui.call_args.args[-1],enabled)
+        with patch.object(launcher.sys,'argv',['run_windows.py','--gui','--vsync','--no-vsync']), \
+             patch.object(launcher.sys,'stderr'),self.assertRaises(SystemExit) as error:
+            launcher.main()
+        self.assertEqual(error.exception.code,2)
+
+    def test_bundled_game_preferences_survive_relocation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base=Path(tmp); original=base/'original'; moved=base/'moved folder'
+            game=game_fixture(original/'game/CUSA03023',title='CUSA03023')
+            with patch.object(launcher,'ROOT',original):
+                self.assertEqual(launcher.read_preferences()['game_dir'],str(game.resolve()))
+                preferences={'game_dir':str(game.resolve()),'language':'zh-cn','fps':'30'}
+                launcher.save_preferences(preferences)
+                self.assertEqual(preferences['game_dir'],str(game.resolve()))
+                saved=json.loads((original/'user/launcher.json').read_text(encoding='utf-8'))
+                self.assertEqual(saved['game_dir'],'game/CUSA03023')
+            original.rename(moved)
+            with patch.object(launcher,'ROOT',moved), \
+                 patch.object(launcher.sys,'argv',['run_windows.py','--prepare-only']), \
+                 patch.object(launcher,'launch') as launch:
+                self.assertEqual(launcher.read_preferences()['game_dir'],str((moved/'game/CUSA03023').resolve()))
+                self.assertEqual(launcher.main(),0)
+                self.assertEqual(launch.call_args.args[0],(moved/'game/CUSA03023').resolve())
+
+    def test_bundled_game_fallback_keeps_valid_external_selection(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp)/'package'; external=game_fixture(Path(tmp)/'external')
+            bundled=game_fixture(root/'game/CUSA03023',title='CUSA03023')
+            with patch.object(launcher,'ROOT',root):
+                launcher.save_preferences({'game_dir':str(root/'missing')})
+                self.assertEqual(launcher.read_preferences()['game_dir'],str(bundled.resolve()))
+                launcher.save_preferences({'game_dir':str(external.resolve())})
+                self.assertEqual(launcher.read_preferences()['game_dir'],str(external.resolve()))
 
     def test_cli_rejects_unknown_controller_layout(self):
         with patch.object(launcher.sys,'argv',['run_windows.py','--game','unused','--controller-layout','invalid']), \
@@ -233,6 +306,14 @@ class WindowsLauncherTests(unittest.TestCase):
             launcher.main()
         self.assertEqual(error.exception.code,2)
         launch.assert_not_called()
+
+    def test_cli_independent_swap_layouts_are_forwarded(self):
+        for layout in ('swap-ab','swap-xy'):
+            with self.subTest(layout=layout), \
+                 patch.object(launcher.sys,'argv',['run_windows.py','--game','unused','--controller-layout',layout]), \
+                 patch.object(launcher,'launch') as launch:
+                self.assertEqual(launcher.main(),0)
+                self.assertEqual(launch.call_args.kwargs['controller_layout'],layout)
 
     def test_fps_choice_matches_game_patch_and_vblank_and_survives_restart(self):
         for fps,hz in (('30','60'),('60','60'),('90','90'),('uncap','0')):

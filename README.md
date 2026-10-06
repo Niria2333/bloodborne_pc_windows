@@ -2,11 +2,11 @@
 
 基于 [deadinside28/bloodborne_pc](https://github.com/deadinside28/bloodborne_pc) 开展 Windows x64 适配。
 
-目前已实现原生 Windows 运行库、Vulkan 渲染器、中文启动器、开场黑屏与音频等待修复，以及全屏、可选 Xbox 按键映射和角色命名键盘。CUSA03023 1.09 已进入实际关卡，用户确认可正常命名并进入游戏；1080p 着色器预热后观察到 60 FPS，首次着色器编译时仍有短暂掉帧。
+目前已实现原生 Windows 运行库、Vulkan 渲染器、中文启动器、开场黑屏与音频等待修复，以及全屏、垂直同步、独立 A/B 与 X/Y 互换和角色命名键盘。新增中文 [Windows 修改器](docs/WINDOWS_TRAINER.md)，支持生命/体力补满、指定血之回响和已有物品数量。CUSA03023 1.09 已进入实际关卡，用户确认可正常命名并进入游戏；1080p 着色器预热后观察到 60 FPS，首次着色器编译时仍有短暂掉帧。
 
 **本项目仍为实验版本。** 4K 为可选输出设置，持续 4K/60 FPS、完整通关和长期稳定性尚未验证。FSR 4 v07 INT8 的资源校验与独立 1080p 基准已通过；游戏内 FSR 4 和 FSR 4.1.1 Windows 适配仍需完成验证或实现。
 
-**本次发布仅含源码，不含游戏本体、Sony 模块、存档或预编译安装包。** 需要自行准备已解密的 CUSA03173 或 CUSA03023、1.09 版游戏目录。自动测试通过 16/16 CTest 和 74/74 Python 测试。
+**本次发布仅含源码，不含游戏本体、Sony 模块、存档或预编译安装包。** 需要自行准备已解密的 CUSA03173 或 CUSA03023、1.09 版游戏目录。2026-10-06 完整验证通过 16/16 CTest 和 107/107 Python 测试，含 28 项修改器测试；游戏内全部修改效果尚未逐一实测。
 
 阅读 [完整中文 README](README.zh-CN.md)、[Windows 构建与运行说明](docs/WINDOWS.md)、[移植总结](docs/WINDOWS_PORT_SUMMARY.md) 和 [验证记录](docs/WINDOWS_VALIDATION.md)。原始 Linux 文档保留在本页下方，其性能数字和 FSR 4.1.1 结果属于上游 Linux 环境。
 
@@ -24,7 +24,8 @@ The Windows additions include:
 
 - A MinGW UCRT64 build, Windows guest threads/TLS, shared memory mapping, exception handling, files and saves, and a native SDL3/Vulkan presenter.
 - Fixes for the opening-video stop/EOF lifecycle and Windows audio-buffer timing.
-- A Chinese launcher with automatic/Chinese/English game language, fullscreen/windowed modes, optional Xbox button mapping, and a controller-operated character-name keyboard.
+- A Chinese launcher with automatic/Chinese/English game language, fullscreen/windowed modes, VSync, independent A/B and X/Y swaps, and a controller-operated character-name keyboard. Preferences persist between runs, including local game-directory detection and paths that survive moving the local project folder.
+- A separate Chinese [Windows trainer](docs/WINDOWS_TRAINER.md) for health/stamina refill, Blood Echoes and existing item quantities. It validates the native process and game instructions, requires explicit activation, and restores instructions on normal disconnect. Hook locations and field semantics credit Shiningami's community cheat table. Item changes affect existing quantities; all in-game scenarios have not been verified.
 - Independent output resolution and graphics quality, FSR 3.1, optional FSR 4 v07 INT8, TAA, effects, and 30/60/90/display-paced frame-rate choices. 90 FPS and display-paced modes are experimental. **FSR 4.1.1 Windows adaptation is pending and cannot be selected in this launcher.**
 
 **This publication contains source code, not a prebuilt Windows release or game data.** Bring your own decrypted CUSA03173 or CUSA03023 v1.09 game directory. FSR 4 model/shader assets are downloaded separately by the included Windows tool; FSR 3.1 needs no model download.
@@ -34,9 +35,11 @@ git clone --branch codex/windows-port --recurse-submodules https://github.com/ya
 cd bloodborne_pc_windows
 powershell -NoProfile -ExecutionPolicy Bypass -File .\build_windows.ps1 -MsysRoot "C:\msys64" -Test
 python .\run_windows.py --gui
+# Start the separate trainer after starting the game:
+python .\bloodborne_trainer.py --gui
 ```
 
-Install the prerequisites in the [Windows guide](docs/WINDOWS.md) first; it lists the MSYS2 dependencies, game-directory layout, and settings. Latest automated validation: **16/16 CTest and 74/74 Python tests passed**.
+Install the prerequisites in the [Windows guide](docs/WINDOWS.md) first; it lists the MSYS2 dependencies, game-directory layout, and settings. Full validation on 2026-10-06: **16/16 CTest and 107/107 Python tests passed**, including 28 trainer tests. The native trainer integration test uses a synthetic Windows process without game data; it does not verify every in-game scenario or item.
 
 This derivative retains the upstream **GPL-2.0-or-later** license ([LICENSE](LICENSE)). The renderer derives from shadPS4; FSR-Vulkan, AMD FidelityFX, Dear ImGui, LibAtrac9, and other dependencies retain their own notices. Credits below apply to this Windows project too. The project is not affiliated with Sony Interactive Entertainment, FromSoftware, or AMD.
 

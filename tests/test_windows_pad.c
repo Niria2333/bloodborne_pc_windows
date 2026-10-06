@@ -37,13 +37,20 @@ static void test_layout(const char *layout,const uint32_t expected[4]) {
     assert(_putenv_s("BB_PAD_LAYOUT",layout)==0);
     const SDL_GamepadButton buttons[]={SDL_GAMEPAD_BUTTON_SOUTH,
         SDL_GAMEPAD_BUTTON_EAST,SDL_GAMEPAD_BUTTON_WEST,SDL_GAMEPAD_BUTTON_NORTH};
-    for (unsigned i=0;i<4;++i) {
-        set_button(buttons[i],1);
-        assert(read_state().buttons==expected[i]);
-        set_button(buttons[i],0);
-        assert_neutral(read_state());
+    /* Every held-button combination catches pair swaps that interfere with
+     * the other pair, as well as duplicate/lost simultaneous inputs. */
+    for (unsigned mask=0;mask<16;++mask) {
+        uint32_t expected_buttons=0;
+        for (unsigned i=0;i<4;++i) {
+            const int down=(mask>>i)&1;
+            set_button(buttons[i],down);
+            if (down) expected_buttons|=expected[i];
+        }
+        assert(read_state().buttons==expected_buttons);
     }
-    printf("Pad layout %s: physical A/B/X/Y passed\n",*layout ? layout : "default");
+    for (unsigned i=0;i<4;++i) set_button(buttons[i],0);
+    assert_neutral(read_state());
+    printf("Pad layout %s: all 16 physical A/B/X/Y combinations passed\n",*layout ? layout : "default");
 }
 static void test_other_inputs(const char *layout) {
     assert(_putenv_s("BB_PAD_LAYOUT",layout)==0);
@@ -135,12 +142,18 @@ int main(void) {
     assert_neutral(read_state());
     const uint32_t ps4[]={BTN_CROSS,BTN_CIRCLE,BTN_SQUARE,BTN_TRIANGLE};
     const uint32_t xbox[]={BTN_CIRCLE,BTN_CROSS,BTN_TRIANGLE,BTN_SQUARE};
+    const uint32_t swap_ab[]={BTN_CIRCLE,BTN_CROSS,BTN_SQUARE,BTN_TRIANGLE};
+    const uint32_t swap_xy[]={BTN_CROSS,BTN_CIRCLE,BTN_TRIANGLE,BTN_SQUARE};
     test_layout("",ps4);
     test_layout("ps4",ps4);
     test_layout("xbox",xbox);
+    test_layout("swap-ab",swap_ab);
+    test_layout("swap-xy",swap_xy);
     test_layout("invalid",ps4);
     test_other_inputs("ps4");
     test_other_inputs("xbox");
+    test_other_inputs("swap-ab");
+    test_other_inputs("swap-xy");
     assert(pad_close(PAD_HANDLE)==0);
     SDL_CloseGamepad(gamepad); gamepad=NULL;
     SDL_CloseJoystick(virtual_pad);
